@@ -4789,32 +4789,40 @@ def get_hardware_disk_info(service_name):
         disk_groups = {}
         
         if 'diskGroups' in hardware:
-            add_log("DEBUG", f"找到 {len(hardware['diskGroups'])} 个磁盘组", "server_control")
-            for group_id, group_info in enumerate(hardware['diskGroups']):
-                add_log("DEBUG", f"磁盘组 {group_id} 原始信息: {json.dumps(group_info, indent=2)}", "server_control")
+            add_log("INFO", f"找到 {len(hardware['diskGroups'])} 个磁盘组", "server_control")
+            for group_info in hardware['diskGroups']:
+                # 使用实际的 diskGroupId，而不是枚举索引
+                disk_group_id = group_info.get('diskGroupId', 0)
+                add_log("DEBUG", f"磁盘组 {disk_group_id} 原始信息: {json.dumps(group_info, indent=2)}", "server_control")
+                
+                # 获取磁盘数量和大小信息
+                number_of_disks = group_info.get('numberOfDisks', 0)
+                disk_size = group_info.get('diskSize', {})
+                disk_size_value = disk_size.get('value', 0) if disk_size else 0
+                disk_size_unit = disk_size.get('unit', 'GB') if disk_size else 'GB'
+                
+                add_log("DEBUG", f"磁盘组 {disk_group_id}: {number_of_disks}块 x {disk_size_value}{disk_size_unit}", "server_control")
                 
                 disk_group = {
-                    'id': group_id,
+                    'id': disk_group_id,  # 使用实际的 diskGroupId
+                    'diskType': group_info.get('diskType'),
+                    'description': group_info.get('description'),
                     'raidController': group_info.get('raidController'),
                     'disks': []
                 }
                 
-                disks_list = group_info.get('disks', [])
-                add_log("DEBUG", f"磁盘组 {group_id} 有 {len(disks_list)} 块盘", "server_control")
-                
-                for disk in disks_list:
-                    add_log("DEBUG", f"磁盘原始数据: {json.dumps(disk, indent=2)}", "server_control")
-                    
+                # 根据 numberOfDisks 和 diskSize 生成磁盘对象数组
+                for disk_number in range(number_of_disks):
                     disk_info = {
-                        'capacity': disk.get('capacity', {}).get('value', 0),
-                        'unit': disk.get('capacity', {}).get('unit', 'GB'),
-                        'interface': disk.get('interface'),
-                        'technology': disk.get('technology'),
-                        'number': disk.get('number', len(disk_group['disks']))
+                        'capacity': disk_size_value,
+                        'unit': disk_size_unit,
+                        'number': disk_number + 1,  # 磁盘编号从1开始
+                        'diskType': group_info.get('diskType')
                     }
                     disk_group['disks'].append(disk_info)
                 
-                disk_groups[str(group_id)] = disk_group
+                add_log("DEBUG", f"磁盘组 {disk_group_id} 生成 {len(disk_group['disks'])} 个磁盘对象", "server_control")
+                disk_groups[str(disk_group_id)] = disk_group
         
         add_log("INFO", f"获取服务器 {service_name} 磁盘信息成功: {len(disk_groups)} 个磁盘组", "server_control")
         return jsonify({

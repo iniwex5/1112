@@ -494,14 +494,17 @@ const ServerControlPage: React.FC = () => {
       }
       
       } else if (groupCount >= 2) {
-        // 多磁盘组：OVH API不支持！
-        showToast({ 
-          type: 'error', 
-          title: 'OVH API限制',
-          message: '多磁盘组服务器不支持自定义分区配置，请使用默认分区'
-        });
+        // 多磁盘组：使用默认分区（OVH会自动智能分配）
         setUseCustomStorage(false);
-        return;
+        setUseSoftwareRaid(false);
+        setCustomPartitions([]);
+        setSelectedRaidConfigs({});
+        
+        showToast({ 
+          type: 'success', 
+          title: '已应用智能配置',
+          message: `多磁盘组使用默认分区（OVH自动分配）- ${groupCount}个磁盘组`
+        });
       }
     
     setShowSmartConfigDialog(false);
@@ -2268,7 +2271,7 @@ const ServerControlPage: React.FC = () => {
                           } else if (groupCount === 1 && diskCount > 1) {
                             scenarioText = `单磁盘组多盘（${diskCount}盘）：RAID0系统盘（最大容量）`;
                           } else {
-                            scenarioText = '⚠️ 多磁盘组不支持自定义分区（OVH API限制）';
+                            scenarioText = '多磁盘组：使用默认分区（OVH自动智能分配）';
                           }
                           
                           setSmartConfigInfo({ groupCount, diskCount, scenario: scenarioText, diskDetails });
@@ -3582,13 +3585,17 @@ const ServerControlPage: React.FC = () => {
 
                   {/* 提示信息 */}
                   {smartConfigInfo.groupCount >= 2 ? (
-                    <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-3 mb-6">
+                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-6">
                       <div className="flex items-start gap-2">
-                        <AlertCircle className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
-                        <div className="text-xs text-orange-300">
-                          <p className="font-semibold mb-1">OVH API限制</p>
-                          <p>多磁盘组服务器不支持自定义分区配置。</p>
-                          <p>建议使用默认分区方案进行安装。</p>
+                        <AlertCircle className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+                        <div className="text-xs text-blue-300">
+                          <p className="font-semibold mb-1">推荐方案</p>
+                          <p>多磁盘组服务器建议使用默认分区，OVH会自动优化分配：</p>
+                          <ul className="list-disc list-inside mt-2 space-y-1">
+                            <li>系统分区自动分配到最快磁盘</li>
+                            <li>数据盘自动配置为可用空间</li>
+                            <li>无需手动配置，安全可靠</li>
+                          </ul>
                         </div>
                       </div>
                     </div>
@@ -3608,19 +3615,17 @@ const ServerControlPage: React.FC = () => {
                     <button
                       onClick={() => setShowSmartConfigDialog(false)}
                       className="px-6 py-2.5 bg-cyber-grid/50 border border-cyber-accent/30 rounded-lg text-cyber-text hover:bg-cyber-accent/10 transition-all">
-                      {smartConfigInfo.groupCount >= 2 ? '关闭' : '取消'}
+                      取消
                     </button>
-                    {smartConfigInfo.groupCount < 2 && (
-                      <button
-                        onClick={() => {
-                          applySmartConfig();
-                          setShowSmartConfigDialog(false);
-                        }}
-                        className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-purple-500 text-white rounded-lg hover:from-cyan-600 hover:to-purple-600 transition-all shadow-lg shadow-cyan-500/20 flex items-center gap-2">
-                        <Check className="w-4 h-4" />
-                        确定
-                      </button>
-                    )}
+                    <button
+                      onClick={() => {
+                        applySmartConfig();
+                        setShowSmartConfigDialog(false);
+                      }}
+                      className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-purple-500 text-white rounded-lg hover:from-cyan-600 hover:to-purple-600 transition-all shadow-lg shadow-cyan-500/20 flex items-center gap-2">
+                      <Check className="w-4 h-4" />
+                      确定
+                    </button>
                   </div>
                 </div>
               </motion.div>
