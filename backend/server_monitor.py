@@ -863,21 +863,23 @@ class ServerMonitor:
                     message += f"服务器: {server_name}\n"
                 
                 message += f"型号: {plan_code}\n"
-                message += f"数据中心: {datacenter}\n"
                 
-                # 添加配置信息（如果有）
+                # 添加配置信息（如果有），使用与上架通知相同的树状格式
                 if config_info:
                     message += (
                         f"配置: {config_info['display']}\n"
+                        f"├─ 内存: {config_info['memory']}\n"
+                        f"└─ 存储: {config_info['storage']}\n"
                     )
                 
-                message += (
-                    f"状态: 已无货\n"
-                    f"时间: {self._now_beijing().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                # 若可用，追加“从有货到无货历时多久”
+                message += f"\n数据中心: {datacenter}\n"
+                message += f"状态: 已无货\n"
+                message += f"⏰ 时间: {self._now_beijing().strftime('%Y-%m-%d %H:%M:%S')}"
+                # 若可用，追加"从有货到无货历时多久"，格式与时间保持一致
                 if duration_text:
-                    message += f"\n{duration_text}"
+                    # duration_text 格式为 "历时 xxx"，改为 "⏱️ 历时: xxx" 以保持样式一致
+                    duration_display = duration_text.replace("历时 ", "⏱️ 历时: ")
+                    message += f"\n{duration_display}"
             
             config_desc = f" [{config_info['display']}]" if config_info else ""
             self.add_log("INFO", f"正在发送Telegram通知: {plan_code}@{datacenter}{config_desc}", "monitor")
