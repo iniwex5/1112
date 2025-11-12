@@ -1,8 +1,3 @@
-# 🎯 OVH Phantom Sniper
-
-OVH 服务器自动抢购系统
-
----
 
 ## 🚀 快速开始
 
@@ -47,7 +42,6 @@ docker-compose up -d --build
 - [@mtrucc](https://github.com/mtrucc) - 技术支持
 
 ## 社区
-
 - **OVH 群组：** [https://t.me/OVHGroup](https://t.me/OVHGroup) - OVH 中文用户交流分享群组
 
 
