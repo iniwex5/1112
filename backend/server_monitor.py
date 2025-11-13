@@ -36,6 +36,10 @@ class ServerMonitor:
         self.price_cache = {}
         self.price_cache_ttl = 3 * 24 * 3600  # 缓存有效期：3天（秒）
         
+        # 有效的plan_code集合：历史上有过价格查询成功的plan_code（永不过期）
+        # 用于自动下单时跳过价格核验，加快下单速度
+        self.valid_plan_codes = set()  # 存储有效的plan_code
+        
         # Options 缓存：key = f"{plan_code}|{datacenter}"，value = {"options": list, "timestamp": float}
         # 用于在 Telegram callback_data 中 options 丢失时恢复（旧机制，保留兼容性）
         self.options_cache = {}
@@ -246,40 +250,49 @@ class ServerMonitor:
                                 first_available_dc = notif["dc"]
                                 break
                         
-                        # 如果有有货的数据中心，查询价格
+                        # 如果有有货的数据中心，查询价格（优先使用缓存）
                         if first_available_dc:
-                            try:
-                                import threading
-                                import queue
-                                price_queue = queue.Queue()
-                                
-                                def fetch_price():
-                                    try:
-                                        price_result = self._get_price_info(plan_code, first_available_dc, config_info)
-                                        price_queue.put(price_result)
-                                    except Exception as e:
-                                        self.add_log("WARNING", f"价格获取线程异常: {str(e)}", "monitor")
-                                        price_queue.put(None)
-                                
-                                # 启动价格获取线程
-                                price_thread = threading.Thread(target=fetch_price, daemon=True)
-                                price_thread.start()
-                                price_thread.join(timeout=30.0)  # 最多等待30秒
-                                
-                                if price_thread.is_alive():
-                                    self.add_log("WARNING", f"价格获取超时（30秒），发送不带价格的通知", "monitor")
-                                else:
-                                    try:
-                                        price_text = price_queue.get_nowait()
-                                    except queue.Empty:
-                                        pass
-                                
-                                if price_text:
-                                    self.add_log("DEBUG", f"配置 {config_display} 价格获取成功: {price_text}，将在所有通知中复用", "monitor")
-                                else:
-                                    self.add_log("WARNING", f"配置 {config_display} 价格获取失败，通知中不包含价格信息", "monitor")
-                            except Exception as e:
-                                self.add_log("WARNING", f"价格获取过程异常: {str(e)}", "monitor")
+                            # 先检查缓存，避免不必要的API调用
+                            options = config_info.get("options", []) if config_info else []
+                            cached_price = self._get_cached_price(plan_code, options)
+                            if cached_price:
+                                price_text = cached_price
+                                self.add_log("DEBUG", f"配置 {config_display} 使用缓存价格: {price_text}", "monitor")
+                            else:
+                                # 缓存不存在，异步查询价格
+                                try:
+                                    import threading
+                                    import queue
+                                    price_queue = queue.Queue()
+                                    
+                                    def fetch_price():
+                                        try:
+                                            price_result = self._get_price_info(plan_code, first_available_dc, config_info)
+                                            price_queue.put(price_result)
+                                        except Exception as e:
+                                            self.add_log("WARNING", f"价格获取线程异常: {str(e)}", "monitor")
+                                            price_queue.put(None)
+                                    
+                                    # 启动价格获取线程（异步，不阻塞通知发送）
+                                    price_thread = threading.Thread(target=fetch_price, daemon=True)
+                                    price_thread.start()
+                                    # 缩短超时时间到10秒，避免长时间阻塞通知发送
+                                    price_thread.join(timeout=10.0)  # 最多等待10秒
+                                    
+                                    if price_thread.is_alive():
+                                        self.add_log("WARNING", f"价格获取超时（10秒），发送不带价格的通知", "monitor")
+                                    else:
+                                        try:
+                                            price_text = price_queue.get_nowait()
+                                        except queue.Empty:
+                                            pass
+                                    
+                                    if price_text:
+                                        self.add_log("DEBUG", f"配置 {config_display} 价格获取成功: {price_text}，将在所有通知中复用", "monitor")
+                                    else:
+                                        self.add_log("WARNING", f"配置 {config_display} 价格获取失败，通知中不包含价格信息", "monitor")
+                                except Exception as e:
+                                    self.add_log("WARNING", f"价格获取过程异常: {str(e)}", "monitor")
                     
                     # 按change_type分组发送通知（汇总同一配置的所有有货机房）
                     available_notifications = [n for n in notifications_to_send if n["change_type"] == "available"]
@@ -290,6 +303,10 @@ class ServerMonitor:
                         try:
                             import requests
                             from api_key_config import API_SECRET_KEY
+                            
+                            # 检查plan_code是否为有效（历史上有过价格查询成功）
+                            is_valid_plan_code = plan_code in self.valid_plan_codes
+                            
                             for notif in available_notifications:
                                 dc_to_order = notif["dc"]
                                 # 使用配置级 options（若存在），否则留空让后端自动匹配
@@ -297,11 +314,17 @@ class ServerMonitor:
                                 payload = {
                                     "planCode": plan_code,
                                     "datacenter": dc_to_order,
-                                    "options": order_options
+                                    "options": order_options,
+                                    "skipPriceCheck": is_valid_plan_code  # 如果plan_code有效，跳过价格核验
                                 }
                                 headers = {"X-API-Key": API_SECRET_KEY}
                                 api_url = "http://127.0.0.1:19998/api/config-sniper/quick-order"
-                                self.add_log("INFO", f"[monitor->order] 尝试快速下单: {plan_code}@{dc_to_order}, options={order_options}", "monitor")
+                                
+                                if is_valid_plan_code:
+                                    self.add_log("INFO", f"[monitor->order] 尝试快速下单（跳过价格核验）: {plan_code}@{dc_to_order}, options={order_options}", "monitor")
+                                else:
+                                    self.add_log("INFO", f"[monitor->order] 尝试快速下单: {plan_code}@{dc_to_order}, options={order_options}", "monitor")
+                                
                                 try:
                                     resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
                                     if resp.status_code == 200:
@@ -804,9 +827,17 @@ class ServerMonitor:
                 if config_info and "cached_price" in config_info:
                     price_text = config_info.get("cached_price")
                     if price_text:
-                        self.add_log("DEBUG", f"使用缓存的价格: {price_text}", "monitor")
+                        self.add_log("DEBUG", f"使用传递的缓存价格: {price_text}", "monitor")
                 
-                # 如果没有缓存的价格，才去查询
+                # 如果没有传递的价格，先检查内存缓存
+                if not price_text and config_info:
+                    options = config_info.get("options", [])
+                    cached_price = self._get_cached_price(plan_code, options)
+                    if cached_price:
+                        price_text = cached_price
+                        self.add_log("DEBUG", f"使用内存缓存价格: {price_text}", "monitor")
+                
+                # 如果还是没有缓存的价格，才去查询（异步，不阻塞通知发送）
                 if not price_text:
                     try:
                         import threading
@@ -821,14 +852,15 @@ class ServerMonitor:
                                 self.add_log("WARNING", f"价格获取线程异常: {str(e)}", "monitor")
                                 price_queue.put(None)
                         
-                        # 启动价格获取线程
+                        # 启动价格获取线程（异步，不阻塞通知发送）
                         price_thread = threading.Thread(target=fetch_price, daemon=True)
                         price_thread.start()
-                        price_thread.join(timeout=30.0)  # 最多等待30秒
+                        # 缩短超时时间到10秒，避免长时间阻塞通知发送
+                        price_thread.join(timeout=10.0)  # 最多等待10秒
                         
                         if price_thread.is_alive():
-                            # 如果线程还在运行，说明超时了
-                            self.add_log("WARNING", f"价格获取超时（30秒），发送不带价格的通知", "monitor")
+                            # 如果线程还在运行，说明超时了，直接发送通知（不等待价格）
+                            self.add_log("WARNING", f"价格获取超时（10秒），发送不带价格的通知", "monitor")
                             price_text = None
                         else:
                             # 尝试获取结果（如果线程完成）
@@ -1018,6 +1050,10 @@ class ServerMonitor:
                     
                     # 保存到缓存
                     self._set_cached_price(plan_code, options, price_text)
+                    
+                    # 标记plan_code为有效（历史上有过价格查询成功）
+                    self.valid_plan_codes.add(plan_code)
+                    self.add_log("DEBUG", f"标记plan_code为有效: {plan_code}（历史上有过价格查询成功）", "monitor")
                     
                     return price_text
                 else:

@@ -469,6 +469,19 @@ def check_server_availability_with_configs(plan_code):
         
         add_log("INFO", f"[配置监控] OVH API 返回 {len(availabilities)} 个配置组合", "monitor")
         
+        # 预先获取catalog（只查询一次，所有配置共享）
+        catalog = None
+        catalog_plan = None
+        try:
+            # 使用默认的IE区域获取catalog（所有配置共享同一个catalog）
+            catalog = client.get('/order/catalog/public/eco?ovhSubsidiary=IE')
+            for plan in catalog.get("plans", []):
+                if plan.get("planCode") == plan_code:
+                    catalog_plan = plan
+                    break
+        except Exception as e:
+            add_log("WARNING", f"[配置监控] 获取catalog失败（将跳过API2选项查找）: {str(e)}", "monitor")
+        
         # 构建配置级别的可用性数据
         result = {}
         for item in availabilities:
@@ -489,37 +502,34 @@ def check_server_availability_with_configs(plan_code):
                     datacenters[dc_name] = availability
             
             # 尝试查找匹配的API2选项代码（用于价格查询）
+            # 使用预先获取的catalog，避免重复API调用
             api2_options = []
-            try:
-                # 使用standardize_config查找匹配的选项
-                memory_std = standardize_config(memory) if memory != "N/A" else None
-                storage_std = standardize_config(storage) if storage != "N/A" else None
-                
-                if memory_std or storage_std:
-                    # 查找catalog中匹配的选项
-                    catalog = client.get(f'/order/catalog/public/eco?ovhSubsidiary={config["zone"]}')
-                    for plan in catalog.get("plans", []):
-                        if plan.get("planCode") == plan_code:
-                            addon_families = plan.get("addonFamilies", [])
+            if catalog_plan:
+                try:
+                    # 使用standardize_config查找匹配的选项
+                    memory_std = standardize_config(memory) if memory != "N/A" else None
+                    storage_std = standardize_config(storage) if storage != "N/A" else None
+                    
+                    if memory_std or storage_std:
+                        addon_families = catalog_plan.get("addonFamilies", [])
+                        
+                        for family in addon_families:
+                            family_name = family.get("name", "").lower()
+                            addons = family.get("addons", [])
                             
-                            for family in addon_families:
-                                family_name = family.get("name", "").lower()
-                                addons = family.get("addons", [])
-                                
-                                if family_name == "memory" and memory_std:
-                                    for addon in addons:
-                                        if standardize_config(addon) == memory_std:
-                                            if addon not in api2_options:
-                                                api2_options.append(addon)
-                                
-                                elif family_name == "storage" and storage_std:
-                                    for addon in addons:
-                                        if standardize_config(addon) == storage_std:
-                                            if addon not in api2_options:
-                                                api2_options.append(addon)
-                            break  # 找到匹配的plan后退出
-            except Exception as e:
-                add_log("WARNING", f"[配置监控] 查找API2选项代码失败: {str(e)}", "monitor")
+                            if family_name == "memory" and memory_std:
+                                for addon in addons:
+                                    if standardize_config(addon) == memory_std:
+                                        if addon not in api2_options:
+                                            api2_options.append(addon)
+                            
+                            elif family_name == "storage" and storage_std:
+                                for addon in addons:
+                                    if standardize_config(addon) == storage_std:
+                                        if addon not in api2_options:
+                                            api2_options.append(addon)
+                except Exception as e:
+                    add_log("WARNING", f"[配置监控] 查找API2选项代码失败: {str(e)}", "monitor")
             
             result[config_key] = {
                 "memory": memory,
@@ -3399,6 +3409,16 @@ def _get_server_price_internal(plan_code, datacenter='gra', options=None):
         
         add_log("INFO", f"价格查询成功: 总价含税={price_info['prices']['withTax']} {price_info['prices']['currencyCode']}", "price")
         
+        # 标记plan_code为有效（历史上有过价格查询成功）
+        # 用于自动下单时跳过价格核验，加快下单速度
+        try:
+            global monitor
+            if monitor and hasattr(monitor, 'valid_plan_codes'):
+                monitor.valid_plan_codes.add(plan_code)
+                add_log("DEBUG", f"标记plan_code为有效: {plan_code}（历史上有过价格查询成功）", "price")
+        except Exception as e:
+            add_log("WARNING", f"标记plan_code为有效时出错: {str(e)}", "price")
+        
         # 清理购物车（删除）
         try:
             client.delete(f'/order/cart/{cart_id}')
@@ -4349,10 +4369,13 @@ def quick_order():
         if not plancode or not datacenter:
             return jsonify({"success": False, "error": "缺少 planCode 或 datacenter"})
 
+        # 检查是否跳过价格核验（用于自动下单，历史上有过价格查询成功的plan_code）
+        skip_price_check = data.get('skipPriceCheck', False)
+        
         # 若未显式传入options，则尝试基于可用性推断一个支持价格的配置（含内存+硬盘）
         if not options:
             try:
-                # 使用“配置级别”的可用性，包含 memory/storage 以及匹配到的 API2 addons（options）
+                # 使用"配置级别"的可用性，包含 memory/storage 以及匹配到的 API2 addons（options）
                 availability_by_config = check_server_availability_with_configs(plancode) or {}
                 # 严格挑选：指定机房在该配置下为可售（非 unavailable/unknown），且能解析出 addons 选项
                 selected_cfg = None
@@ -4368,7 +4391,7 @@ def quick_order():
                             options = cand_opts
                             break
                 if not options:
-                    # 没有找到在该机房“可售且可定价（有addons）”的配置，直接返回 400，避免错误下单
+                    # 没有找到在该机房"可售且可定价（有addons）"的配置，直接返回 400，避免错误下单
                     err_msg = f"指定机房无可定价配置（{plancode}@{datacenter}）"
                     add_log("WARNING", f"[config_sniper] {err_msg}", "config_sniper")
                     return jsonify({"success": False, "error": err_msg}), 400
@@ -4376,19 +4399,34 @@ def quick_order():
                 add_log("WARNING", f"快速下单推断配置失败: {plancode}@{datacenter} - {str(e)}", "config_sniper")
                 # 不中断流程，继续按空options尝试价格
 
-        # 先通过临时购物车获取价格，确保该组合可下单（无价格则不支持下单）
-        price_result = _get_server_price_internal(plancode, datacenter, options)
-        if not price_result.get("success"):
-            err = price_result.get("error") or "价格查询失败"
-            add_log("WARNING", f"快速下单前价格校验失败: {plancode}@{datacenter} - {err}", "config_sniper")
-            return jsonify({"success": False, "error": f"价格校验失败：{err}"}), 400
+        # 如果跳过价格核验（历史上有过价格查询成功的plan_code），直接进入下单流程
+        price_payload = {}
+        with_tax = None
+        
+        if skip_price_check:
+            add_log("INFO", f"快速下单跳过价格核验（plan_code历史上有过价格查询成功）: {plancode}@{datacenter}", "config_sniper")
+            # 设置一个默认价格结构，避免后续代码报错
+            price_payload = {
+                "prices": {
+                    "withTax": 0.0,  # 占位值，实际不会使用
+                    "currencyCode": "EUR"
+                }
+            }
+            with_tax = 0.0
+        else:
+            # 先通过临时购物车获取价格，确保该组合可下单（无价格则不支持下单）
+            price_result = _get_server_price_internal(plancode, datacenter, options)
+            if not price_result.get("success"):
+                err = price_result.get("error") or "价格查询失败"
+                add_log("WARNING", f"快速下单前价格校验失败: {plancode}@{datacenter} - {err}", "config_sniper")
+                return jsonify({"success": False, "error": f"价格校验失败：{err}"}), 400
 
-        price_payload = price_result.get("price") or {}
-        price_values = (price_payload.get("prices") or {})
-        with_tax = price_values.get("withTax")
-        if with_tax in [None, 0, 0.0]:
-            add_log("WARNING", f"快速下单前价格缺失或无效: {plancode}@{datacenter}", "config_sniper")
-            return jsonify({"success": False, "error": "该组合暂无有效价格，暂不支持下单"}), 400
+            price_payload = price_result.get("price") or {}
+            price_values = (price_payload.get("prices") or {})
+            with_tax = price_values.get("withTax")
+            if with_tax in [None, 0, 0.0]:
+                add_log("WARNING", f"快速下单前价格缺失或无效: {plancode}@{datacenter}", "config_sniper")
+                return jsonify({"success": False, "error": "该组合暂无有效价格，暂不支持下单"}), 400
 
         # 防重复（仅限 quick-order）：若同一 planCode+datacenter+options（配置指纹）
         # 已在队列运行/等待，或刚刚成功下过单，则拒绝再次入队
