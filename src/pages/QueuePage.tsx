@@ -28,6 +28,9 @@ interface QueueItem {
   retryCount: number;
   accountId?: string;
   quantity?: number;
+  purchased?: number;
+  failureCount?: number;
+  nextAttemptAt?: number;
 }
 
 interface ServerOption {
@@ -75,7 +78,6 @@ const QueuePage = () => {
   const [draggingDc, setDraggingDc] = useState<string | null>(null);
   const [retryInterval, setRetryInterval] = useState<number>(TASK_RETRY_INTERVAL);
   const [quantity, setQuantity] = useState<number>(1);
-  const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]); // 选中的可选配置
   const [optionsInput, setOptionsInput] = useState<string>(''); // 用户自定义输入
   const [showClearConfirm, setShowClearConfirm] = useState(false); // 清空确认对话框
@@ -142,54 +144,31 @@ const QueuePage = () => {
       return;
     }
 
-    if (orderQuantity < 1 || orderQuantity > 4) {
-      toast.error("每次下单数量必须在 1-4 之间");
-      return;
-    }
 
     if (retryInterval <= 0) {
       toast.error("重试间隔必须大于 0 秒");
       return;
     }
 
-    let successCount = 0;
-    let errorCount = 0;
-    const totalTasks = quantity;
-
-    toast.info(`正在创建 ${totalTasks} 个抢购任务（按优先级顺序）...`);
-
-    for (let i = 0; i < quantity; i++) {
-      try {
-        await api.post(`/queue`, {
-          planCode: planCodeInput.trim(),
-          datacenters: selectedDatacenters,
-          retryInterval: retryInterval,
-          options: selectedOptions,
-          quantity: orderQuantity,
-        });
-        successCount++;
-      } catch (error) {
-        console.error(`Error adding ${planCodeInput.trim()} (${i + 1}/${quantity}) to queue:`, error);
-        errorCount++;
-      }
-    }
-
-    if (successCount > 0) {
-      toast.success(`${successCount}/${totalTasks} 个任务已成功添加到抢购队列`);
-    }
-    if (errorCount > 0) {
-      toast.error(`${errorCount}/${totalTasks} 个任务添加失败`);
-    }
-
-    if (successCount > 0 || errorCount === 0) {
+    try {
+      await api.post(`/queue`, {
+        planCode: planCodeInput.trim(),
+        datacenters: selectedDatacenters,
+        retryInterval: retryInterval,
+        options: selectedOptions,
+        quantity: quantity,
+      });
+      toast.success(`已创建抢购任务，目标 ${quantity} 台`);
       fetchQueueItems(true);
       setPlanCodeInput("");
       setSelectedDatacenters([]);
       setRetryInterval(TASK_RETRY_INTERVAL);
       setQuantity(1);
-      setOrderQuantity(1);
       setSelectedOptions([]);
       setOptionsInput('');
+    } catch (error) {
+      console.error(`Error adding ${planCodeInput.trim()} to queue:`, error);
+      toast.error("添加到队列失败");
     }
   };
 
@@ -198,8 +177,7 @@ const QueuePage = () => {
     setEditingItemId(item.id);
     setPlanCodeInput(item.planCode || '');
     setRetryInterval(item.retryInterval || TASK_RETRY_INTERVAL);
-    setQuantity(1);
-    setOrderQuantity(Math.min(Math.max(item.quantity || 1, 1), 4));
+    setQuantity(Math.min(Math.max(item.quantity || 1, 1), 100));
     setSelectedOptions(Array.isArray(item.options) ? item.options : []);
     setOptionsInput((Array.isArray(item.options) ? item.options : []).join(', '));
     setTimeout(() => {
@@ -220,22 +198,17 @@ const QueuePage = () => {
       toast.error('请输入服务器计划代码并至少选择一个数据中心');
       return;
     }
-    if (orderQuantity < 1 || orderQuantity > 4) {
-      toast.error('每次下单数量必须在 1-4 之间');
-      return;
-    }
     try {
       await api.put(`/queue/${editingItemId}`, {
         planCode: planCodeInput.trim(),
         datacenters: selectedDatacenters,
         retryInterval,
         options: selectedOptions,
-        quantity: orderQuantity,
+        quantity,
       });
       toast.success('队列已更新');
       setEditingItemId(null);
       setPlanCodeInput("");
-      setOrderQuantity(1);
       fetchQueueItems(true);
     } catch (error) {
       console.error('更新队列失败', error);
@@ -702,26 +675,7 @@ const QueuePage = () => {
                   placeholder="默认: 1台"
                 />
               </div>
-              <div className="md:w-[220px]">
-                <label htmlFor="orderQuantity" className="block text-sm font-medium text-cyber-secondary mb-1">每次下单数量</label>
-                <input
-                  type="number"
-                  id="orderQuantity"
-                  value={orderQuantity}
-                  onChange={(e) => {
-                    const value = Number(e.target.value);
-                  if (value >= 1 && value <= 4) {
-                    setOrderQuantity(value);
-                  } else {
-                      toast.warning("每次下单数量必须在 1-4 之间");
-                  }
-                  }}
-                  min={1}
-                  max={4}
-                  className="w-full cyber-input bg-cyber-surface text-cyber-text border-cyber-border focus:ring-cyber-primary focus:border-cyber-primary"
-                  placeholder="默认: 1台"
-                />
-              </div>
+              
               <div className="md:w-[260px]">
                 <label htmlFor="retryInterval" className="block text-sm font-medium text-cyber-secondary mb-1">抢购失败后重试间隔 (秒)</label>
                 <input
@@ -898,14 +852,7 @@ const QueuePage = () => {
                 className="w-full cyber-button bg-cyber-primary hover:bg-cyber-primary-dark text-white font-semibold py-2.5"
                 disabled={!planCodeInput.trim() || selectedDatacenters.length === 0}
               >
-                {editingItemId
-                  ? '修改队列'
-                  : selectedDatacenters.length > 0 && quantity > 1 
-                    ? `添加到队列（将创建 ${selectedDatacenters.length * quantity} 个区域${selectedOptions.length > 0 ? `，含${selectedOptions.length}个可选配置` : ''}）`
-                    : selectedDatacenters.length > 0 && quantity === 1
-                      ? `添加到队列（${selectedDatacenters.length} 个区域${selectedOptions.length > 0 ? `，含${selectedOptions.length}个可选配置` : ''}）`
-                      : '添加到队列'
-                }
+                {editingItemId ? '修改队列' : selectedDatacenters.length > 0 ? `添加到队列（目标 ${quantity} 台${selectedOptions.length > 0 ? `，含${selectedOptions.length}个可选配置` : ''}）` : '添加到队列'}
               </button>
             </div>
           </div>
@@ -975,11 +922,18 @@ const QueuePage = () => {
                       </span>
                     )}
                     <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30 flex items-center gap-1">
-                      <ShoppingCart size={12} /> x{item.quantity || 1}
+                      <ShoppingCart size={12} /> {Math.min(item.purchased || 0, item.quantity || 0)} / {item.quantity || 0}
                     </span>
                   </div>
                   <p className="text-xs text-cyber-muted">
-                    下次尝试: {item.retryCount > 0 ? `${item.retryInterval}秒后 (第${item.retryCount + 1}次)` : `即将开始` } | 创建于: {new Date(item.createdAt || Date.now()).toLocaleString()}
+                    {(() => {
+                      const now = Date.now() / 1000;
+                      const next = typeof item.nextAttemptAt === 'number' ? item.nextAttemptAt : 0;
+                      if (item.status !== 'running') return `状态: ${item.status} | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                      if (!next || next <= now) return `下次尝试: 即将开始 | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                      const diff = Math.max(0, Math.round(next - now));
+                      return `下次尝试: ${diff} 秒后 (第${(item.retryCount || 0) + 1}次) | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                    })()}
                   </p>
                   {Array.isArray(item.options) && item.options.length > 0 && (
                     <p className="text-xs text-cyber-muted mt-1">

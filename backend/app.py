@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -23,6 +24,7 @@ from api_auth_middleware import init_api_auth
 
 # 导入服务器监控器
 from server_monitor import ServerMonitor
+from ovh_api_helper import get_global_helper
 
 # Data storage directories
 DATA_DIR = "data"
@@ -134,6 +136,12 @@ vps_monitor_running = False
 vps_monitor_thread = None
 vps_check_interval = 60  # VPS检查间隔（秒）
 
+# 轻量并发控制结构
+queue_lock = threading.RLock()
+processing_item_ids = set()
+account_checkout_semaphores = {}
+executor = ThreadPoolExecutor(max_workers=3)
+
 # Load data from files if they exist
 def load_data():
     global config, logs, queue, purchase_history, server_plans, stats, config_sniper_tasks, vps_subscriptions, vps_check_interval, accounts, default_account_id
@@ -153,6 +161,23 @@ def load_data():
                     accounts = {a.get("id"): a for a in accs if a and a.get("id")}
                 elif isinstance(accs, dict):
                     accounts = accs
+                # 清理旧字段：移除每个账户中的 tgToken / tgChatId（统一使用全局配置）
+                try:
+                    changed = False
+                    for k, v in list(accounts.items()):
+                        if isinstance(v, dict):
+                            before = (v.get('tgToken'), v.get('tgChatId'))
+                            v.pop('tgToken', None)
+                            v.pop('tgChatId', None)
+                            after = (v.get('tgToken'), v.get('tgChatId'))
+                            if before != after:
+                                changed = True
+                    if changed:
+                        # 回写清理后的文件
+                        save_accounts()
+                        print("已清理accounts文件中的Telegram字段，改为使用全局配置")
+                except Exception as e:
+                    print(f"清理账户字段失败: {e}")
         except Exception as e:
             print(f"警告: {ACCOUNTS_FILE}文件读取失败: {e}")
 
@@ -328,7 +353,7 @@ def load_data():
     except Exception as e:
         print(f"队列去重失败: {e}")
 
-    # 规范化队列项的单次下单数量（补齐旧任务）
+    # 规范化队列项字段（新语义：quantity 为目标总台数）
     try:
         normalized = 0
         for item in queue:
@@ -337,14 +362,22 @@ def load_data():
                 q = int(q) if q is not None else 1
             except Exception:
                 q = 1
-            q = max(1, min(q, 4))
+            q = max(1, min(q, 100))
             if item.get("quantity") != q:
                 item["quantity"] = q
                 normalized += 1
+            if item.get("purchased") is None:
+                item["purchased"] = 0
+            if item.get("failureCount") is None:
+                item["failureCount"] = 0
+            if item.get("nextAttemptAt") is None:
+                item["nextAttemptAt"] = 0
+            if item.get("maxRetryCount") is None:
+                item["maxRetryCount"] = 50
         if normalized:
-            print(f"已规范化 {normalized} 个队列项的单次下单数量到1-4范围")
+            print(f"已规范化 {normalized} 个队列项的抢购单量到1-100范围")
     except Exception as e:
-        print(f"规范化队列项quantity失败: {e}")
+        print(f"规范化队列项字段失败: {e}")
 
     # 加载各账户抢购历史分片
     try:
@@ -494,8 +527,15 @@ def save_vps_subscriptions():
 
 def save_accounts():
     try:
+        # 写入时剔除与通知无关的字段（统一使用全局TG配置）
+        sanitized_list = []
+        for acc in accounts.values():
+            a = dict(acc)
+            a.pop('tgToken', None)
+            a.pop('tgChatId', None)
+            sanitized_list.append(a)
         payload = {
-            "accounts": list(accounts.values())
+            "accounts": sanitized_list
         }
         with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -957,12 +997,13 @@ def purchase_server(queue_item):
     client = get_ovh_client(queue_item.get("accountId"))
     if not client:
         return False
+    helper = get_global_helper(client, max_calls_per_second=5)
     
     cart_id = None # Initialize cart_id to None
     item_id = None # Initialize item_id to None
 
-    # 读取每个任务内的下单数量与是否自动付款
-    quantity = queue_item.get("quantity", 1)
+    # 每次加入购物车固定 1 台
+    quantity = 1
     auto_pay = queue_item.get("auto_pay", False)
     
     try:
@@ -979,7 +1020,7 @@ def purchase_server(queue_item):
 
         add_log("INFO", f"开始为 {queue_item['planCode']} 在 {','.join(sorted_target_dcs)} 的购买流程（按顺序优先）", "purchase")
 
-        availabilities = client.get('/dedicated/server/datacenter/availabilities', planCode=queue_item["planCode"])
+        availabilities = helper.get('/dedicated/server/datacenter/availabilities', planCode=queue_item["planCode"])
         found_available = False
         selected_api_dc = None
         selected_display_dc = None
@@ -1007,7 +1048,7 @@ def purchase_server(queue_item):
         # Create cart
         zone_cfg = get_current_account_config(queue_item.get("accountId"))
         add_log("INFO", f"为区域 {zone_cfg['zone']} 创建购物车", "purchase")
-        cart_result = client.post('/order/cart', ovhSubsidiary=zone_cfg["zone"])
+        cart_result = helper.post('/order/cart', ovhSubsidiary=zone_cfg["zone"])
         cart_id = cart_result["cartId"]
         add_log("INFO", f"购物车创建成功，ID: {cart_id}", "purchase")
         
@@ -1019,7 +1060,7 @@ def purchase_server(queue_item):
             "duration": "P1M",  # 1 month
             "quantity": quantity
         }
-        item_result = client.post(f'/order/cart/{cart_id}/eco', **item_payload)
+        item_result = helper.post(f'/order/cart/{cart_id}/eco', **item_payload)
         item_id = item_result["itemId"] # This is the itemId for the base server
         add_log("INFO", f"基础商品添加成功，项目 ID: {item_id}", "purchase")
         
@@ -1049,7 +1090,7 @@ def purchase_server(queue_item):
         else:
             add_log("WARNING", f"无法为数据中心 {dc_lower} 推断区域，可能导致配置失败", "purchase")
             try:
-                required_configs_list = client.get(f'/order/cart/{cart_id}/item/{item_id}/requiredConfiguration')
+                required_configs_list = helper.get(f'/order/cart/{cart_id}/item/{item_id}/requiredConfiguration')
                 if any(conf.get("label") == "region" and conf.get("required") for conf in required_configs_list):
                     raise Exception("必需的区域配置无法确定。")
             except Exception as rc_err:
@@ -1058,7 +1099,7 @@ def purchase_server(queue_item):
         for label, value in configurations_to_set.items():
             if value is None: continue
             add_log("INFO", f"配置项目 {item_id}: 设置必需项 {label} = {value}", "purchase")
-            client.post(f'/order/cart/{cart_id}/item/{item_id}/configuration',
+            helper.post(f'/order/cart/{cart_id}/item/{item_id}/configuration',
                        label=label,
                        value=str(value))
             add_log("INFO", f"成功设置必需项: {label} = {value}", "purchase")
@@ -1084,7 +1125,7 @@ def purchase_server(queue_item):
                 add_log("INFO", f"过滤后的硬件选项计划代码: {filtered_hardware_options}", "purchase")
                 try:
                     add_log("INFO", f"获取购物车 {cart_id} 中与基础商品 {queue_item['planCode']} 兼容的 Eco 硬件选项...", "purchase")
-                    available_eco_options = client.get(f'/order/cart/{cart_id}/eco/options', planCode=queue_item['planCode'])
+                    available_eco_options = helper.get(f'/order/cart/{cart_id}/eco/options', planCode=queue_item['planCode'])
                     add_log("INFO", f"找到 {len(available_eco_options)} 个可用的 Eco 硬件选项。", "purchase")
                     added_options_count = 0
                     for wanted_option_plan_code in filtered_hardware_options:
@@ -1104,7 +1145,7 @@ def purchase_server(queue_item):
                                         "quantity": 1
                                     }
                                     add_log("INFO", f"准备添加 Eco 选项: {option_payload_eco}", "purchase")
-                                    client.post(f'/order/cart/{cart_id}/eco/options', **option_payload_eco)
+                                    helper.post(f'/order/cart/{cart_id}/eco/options', **option_payload_eco)
                                     add_log("INFO", f"成功添加 Eco 选项: {avail_opt_plan_code} 到购物车 {cart_id}", "purchase")
                                     added_options_count += 1
                                     option_added_successfully = True
@@ -1126,14 +1167,14 @@ def purchase_server(queue_item):
             add_log("INFO", "⚠️ 用户未提供任何硬件选项，将使用默认配置下单", "purchase")
 
         add_log("INFO", f"绑定购物车 {cart_id}", "purchase")
-        client.post(f'/order/cart/{cart_id}/assign')
+        helper.post(f'/order/cart/{cart_id}/assign')
         add_log("INFO", "购物车绑定成功", "purchase")
         
         # 获取购物车摘要以提取价格信息
         price_info = None
         try:
             add_log("INFO", f"获取购物车 {cart_id} 摘要以提取价格信息", "purchase")
-            cart_summary = client.get(f'/order/cart/{cart_id}/summary')
+            cart_summary = helper.get(f'/order/cart/{cart_id}/summary')
             
             if cart_summary and isinstance(cart_summary, dict):
                 prices_field = cart_summary.get("prices")
@@ -1177,46 +1218,32 @@ def purchase_server(queue_item):
             "autoPayWithPreferredPaymentMethod": auto_pay, 
             "waiveRetractationPeriod": True
         }
-        checkout_result = client.post(f'/order/cart/{cart_id}/checkout', **checkout_payload)
+        checkout_result = helper.post(f'/order/cart/{cart_id}/checkout', **checkout_payload)
         
         order_id_val = checkout_result.get("orderId", "")
         order_url_val = checkout_result.get("url", "")
         
-        # Update or create purchase history entry for SUCCESS
-        existing_history_entry = next((h for h in purchase_history if h.get("taskId") == queue_item["id"]), None)
+        # 记录单次成功：始终追加一条历史，不覆盖同任务的以往记录
         current_time_iso = datetime.now().isoformat()
-
-        if existing_history_entry:
-            existing_history_entry["status"] = "success"
-            existing_history_entry["orderId"] = order_id_val
-            existing_history_entry["orderUrl"] = order_url_val
-            existing_history_entry["errorMessage"] = None # Clear previous error on success
-            existing_history_entry["purchaseTime"] = current_time_iso
-            existing_history_entry["attemptCount"] = queue_item["retryCount"]
-            existing_history_entry["options"] = queue_item.get("options", [])
-            existing_history_entry["accountId"] = queue_item.get("accountId")
-            if price_info:
-                existing_history_entry["price"] = price_info
-            add_log("INFO", f"更新抢购历史(成功) 任务ID: {queue_item['id']}", "purchase")
-        else:
-            history_entry = {
-                "id": str(uuid.uuid4()),
-                "taskId": queue_item["id"],
-                "planCode": queue_item["planCode"],
-                "datacenter": selected_display_dc or (queue_item.get("datacenters") or [None])[0],
-                "options": queue_item.get("options", []),
-                "status": "success",
-                "orderId": order_id_val,
-                "orderUrl": order_url_val,
-                "errorMessage": None,
-                "purchaseTime": current_time_iso,
-                "attemptCount": queue_item["retryCount"],
-                "accountId": queue_item.get("accountId")
-            }
-            if price_info:
-                history_entry["price"] = price_info
-            purchase_history.append(history_entry)
-            add_log("INFO", f"创建抢购历史(成功) 任务ID: {queue_item['id']}", "purchase")
+        history_entry = {
+            "id": str(uuid.uuid4()),
+            "taskId": queue_item["id"],
+            "planCode": queue_item["planCode"],
+            "datacenter": selected_display_dc or (queue_item.get("datacenters") or [None])[0],
+            "options": queue_item.get("options", []),
+            "status": "success",
+            "orderId": order_id_val,
+            "orderUrl": order_url_val,
+            "errorMessage": None,
+            "purchaseTime": current_time_iso,
+            "attemptCount": queue_item["retryCount"],
+            "accountId": queue_item.get("accountId"),
+            "sequence": int(queue_item.get("purchased", 0)) + 1
+        }
+        if price_info:
+            history_entry["price"] = price_info
+        purchase_history.append(history_entry)
+        add_log("INFO", f"创建抢购历史(成功) 任务ID: {queue_item['id']}", "purchase")
         
         save_data()
         update_stats()
@@ -1252,37 +1279,24 @@ def purchase_server(queue_item):
         if cart_id: add_log("ERROR", f"错误发生时的购物车ID: {cart_id}", "purchase")
         if item_id: add_log("ERROR", f"错误发生时的基础商品ID: {item_id}", "purchase")
         
-        # Update or create purchase history entry for API FAILURE
-        existing_history_entry = next((h for h in purchase_history if h.get("taskId") == queue_item["id"]), None)
+        # 记录失败（API错误）：始终追加一条历史，不覆盖同任务的以往记录
         current_time_iso = datetime.now().isoformat()
-
-        if existing_history_entry:
-            existing_history_entry["status"] = "failed"
-            existing_history_entry["orderId"] = None
-            existing_history_entry["orderUrl"] = None
-            existing_history_entry["errorMessage"] = error_msg
-            existing_history_entry["purchaseTime"] = current_time_iso
-            existing_history_entry["attemptCount"] = queue_item["retryCount"]
-            existing_history_entry["options"] = queue_item.get("options", [])
-            existing_history_entry["accountId"] = queue_item.get("accountId")
-            add_log("INFO", f"更新抢购历史(API失败) 任务ID: {queue_item['id']}", "purchase")
-        else:
-            history_entry = {
-                "id": str(uuid.uuid4()),
-                "taskId": queue_item["id"],
-                "planCode": queue_item["planCode"],
-                "datacenter": (queue_item.get("datacenters") or [None])[0],
-                "options": queue_item.get("options", []),
-                "status": "failed",
-                "orderId": None,
-                "orderUrl": None,
-                "errorMessage": error_msg,
-                "purchaseTime": current_time_iso,
-                "attemptCount": queue_item["retryCount"],
-                "accountId": queue_item.get("accountId")
-            }
-            purchase_history.append(history_entry)
-            add_log("INFO", f"创建抢购历史(API失败) 任务ID: {queue_item['id']}", "purchase")
+        history_entry = {
+            "id": str(uuid.uuid4()),
+            "taskId": queue_item["id"],
+            "planCode": queue_item["planCode"],
+            "datacenter": (queue_item.get("datacenters") or [None])[0],
+            "options": queue_item.get("options", []),
+            "status": "failed",
+            "orderId": None,
+            "orderUrl": None,
+            "errorMessage": error_msg,
+            "purchaseTime": current_time_iso,
+            "attemptCount": queue_item["retryCount"],
+            "accountId": queue_item.get("accountId")
+        }
+        purchase_history.append(history_entry)
+        add_log("INFO", f"创建抢购历史(API失败) 任务ID: {queue_item['id']}", "purchase")
 
         save_data()
         update_stats()
@@ -1295,37 +1309,24 @@ def purchase_server(queue_item):
         if cart_id: add_log("ERROR", f"错误发生时的购物车ID: {cart_id}", "purchase")
         if item_id: add_log("ERROR", f"错误发生时的基础商品ID: {item_id}", "purchase")
 
-        # Update or create purchase history entry for GENERAL FAILURE
-        existing_history_entry = next((h for h in purchase_history if h.get("taskId") == queue_item["id"]), None)
+        # 记录失败（通用异常）：始终追加一条历史，不覆盖同任务的以往记录
         current_time_iso = datetime.now().isoformat()
-
-        if existing_history_entry:
-            existing_history_entry["status"] = "failed"
-            existing_history_entry["orderId"] = None
-            existing_history_entry["orderUrl"] = None
-            existing_history_entry["errorMessage"] = error_msg
-            existing_history_entry["purchaseTime"] = current_time_iso
-            existing_history_entry["attemptCount"] = queue_item["retryCount"]
-            existing_history_entry["options"] = queue_item.get("options", [])
-            existing_history_entry["accountId"] = queue_item.get("accountId")
-            add_log("INFO", f"更新抢购历史(通用失败) 任务ID: {queue_item['id']}", "purchase")
-        else:
-            history_entry = {
-                "id": str(uuid.uuid4()),
-                "taskId": queue_item["id"],
-                "planCode": queue_item["planCode"],
-                "datacenter": (queue_item.get("datacenters") or [None])[0],
-                "options": queue_item.get("options", []),
-                "status": "failed",
-                "orderId": None,
-                "orderUrl": None,
-                "errorMessage": error_msg,
-                "purchaseTime": current_time_iso,
-                "attemptCount": queue_item["retryCount"],
-                "accountId": queue_item.get("accountId")
-            }
-            purchase_history.append(history_entry)
-            add_log("INFO", f"创建抢购历史(通用失败) 任务ID: {queue_item['id']}", "purchase")
+        history_entry = {
+            "id": str(uuid.uuid4()),
+            "taskId": queue_item["id"],
+            "planCode": queue_item["planCode"],
+            "datacenter": (queue_item.get("datacenters") or [None])[0],
+            "options": queue_item.get("options", []),
+            "status": "failed",
+            "orderId": None,
+            "orderUrl": None,
+            "errorMessage": error_msg,
+            "purchaseTime": current_time_iso,
+            "attemptCount": queue_item["retryCount"],
+            "accountId": queue_item.get("accountId")
+        }
+        purchase_history.append(history_entry)
+        add_log("INFO", f"创建抢购历史(通用失败) 任务ID: {queue_item['id']}", "purchase")
         
         save_data()
         update_stats()
@@ -1334,76 +1335,89 @@ def purchase_server(queue_item):
 # Process queue items
 def process_queue():
     global deleted_task_ids
-    while True:
-        # 在循环开始时检查队列是否为空
-        if not queue:
-            time.sleep(1)
-            continue
-            
-        # 复制一份并按优先级排序：quickOrder 优先，其次按创建时间
-        items_to_process = sorted(
-            list(queue),
-            key=lambda it: (
-                0 if it.get("quickOrder") else 1,                 # quickOrder 优先
-                -int(datetime.fromisoformat(it.get("createdAt")).timestamp()) if it.get("createdAt") else 0  # 越新越先
-            )
-        )
-        for item in items_to_process:
-            # 优先检查：任务是否在删除集合中（前端删除时立即生效）
-            if item["id"] in deleted_task_ids:
-                add_log("INFO", f"任务 {item['id']} 已被标记为删除，跳过处理", "queue")
-                continue
-            
-            # 次要检查：在处理前检查项目是否仍在原始队列中（通过ID检查）
-            item_still_exists = any(q_item["id"] == item["id"] for q_item in queue)
-            if not item_still_exists:
-                add_log("INFO", f"任务 {item['id']} 已从队列中移除，跳过处理", "queue")
-                # 添加到删除集合，避免重复处理
-                deleted_task_ids.add(item["id"])
-                continue
-            
-            if item["status"] == "running":
-                current_time = time.time()
-                last_check_time = item.get("lastCheckTime", 0)
-                
-                # 如果是首次尝试 (lastCheckTime为0) 或者到达重试间隔
-                if last_check_time == 0 or (current_time - last_check_time >= item["retryInterval"]):
-                    # 最后检查：任务是否被标记删除
-                    if item["id"] in deleted_task_ids:
-                        add_log("INFO", f"任务 {item['id']} 在执行前被标记删除", "queue")
-                        continue
-                    
-                    # 再次检查任务是否还在队列中（可能在等待期间被删除）
-                    if not any(q_item["id"] == item["id"] for q_item in queue):
-                        add_log("INFO", f"任务 {item['id']} 在处理前被移除", "queue")
-                        deleted_task_ids.add(item["id"])
-                        continue
-                    
-                    target_dcs_text = item.get('datacenter') or ','.join(item.get('datacenters') or [])
-                    if last_check_time == 0:
-                        add_log("INFO", f"首次尝试任务 {item['id']}: {item['planCode']} 在 {target_dcs_text}", "queue")
-                    else:
-                        add_log("INFO", f"重试检查任务 {item['id']} (尝试次数: {item['retryCount'] + 1}): {item['planCode']} 在 {target_dcs_text}", "queue")
-                    
-                    # 更新检查时间和重试计数
-                    item["lastCheckTime"] = current_time
-                    item["retryCount"] += 1
+    def get_account_sem(account_id):
+        if account_id not in account_checkout_semaphores:
+            account_checkout_semaphores[account_id] = threading.Semaphore(1)
+        return account_checkout_semaphores[account_id]
+
+    def compute_next_attempt(item):
+        base = max(1, int(item.get("retryInterval", 30)))
+        failure = int(item.get("failureCount", 0))
+        interval = min(300.0, base * (2 ** min(failure, 6)))
+        jitter = 0.8 + (0.4 * (time.time() % 1))
+        return time.time() + interval * jitter
+
+    def execute_queue_item(item_id):
+        try:
+            with queue_lock:
+                item = next((x for x in queue if x["id"] == item_id), None)
+            if not item or item_id in deleted_task_ids:
+                return
+            if item.get("status") != "running":
+                return
+            if int(item.get("purchased", 0)) >= int(item.get("quantity", 1)):
+                with queue_lock:
+                    item["status"] = "completed"
                     item["updatedAt"] = datetime.now().isoformat()
-                    
-                    # 尝试购买
-                    if purchase_server(item):
+                return
+            acc_id = item.get("accountId")
+            sem = get_account_sem(acc_id)
+            with queue_lock:
+                item["lastCheckTime"] = time.time()
+                item["retryCount"] = int(item.get("retryCount", 0)) + 1
+                target_dcs_text = item.get('datacenter') or ','.join(item.get('datacenters') or [])
+                add_log("INFO", f"尝试任务 {item['id']}: {item['planCode']} 在 {target_dcs_text}", "queue")
+            with sem:
+                ok = purchase_server(item)
+            with queue_lock:
+                if ok:
+                    item["purchased"] = int(item.get("purchased", 0)) + 1
+                    item["failureCount"] = 0
+                    if int(item.get("purchased", 0)) >= int(item.get("quantity", 1)):
                         item["status"] = "completed"
-                        item["updatedAt"] = datetime.now().isoformat()
-                        log_message_verb = "首次尝试购买成功" if item["retryCount"] == 1 else f"重试购买成功 (尝试次数: {item['retryCount']})"
-                        add_log("INFO", f"{log_message_verb}: {item['planCode']} 在 {target_dcs_text} (ID: {item['id']})", "queue")
                     else:
-                        log_message_verb = "首次尝试购买失败或服务器暂无货" if item["retryCount"] == 1 else f"重试购买失败或服务器仍无货 (尝试次数: {item['retryCount']})"
-                        add_log("INFO", f"{log_message_verb}: {item['planCode']} 在 {target_dcs_text} (ID: {item['id']})。将根据重试间隔再次尝试。", "queue")
-                    
-                    save_data() # 保存队列状态
-                    update_stats() # 更新统计信息
-        
-        time.sleep(1) # 每秒检查一次队列
+                        item["nextAttemptAt"] = compute_next_attempt(item)
+                else:
+                    item["failureCount"] = int(item.get("failureCount", 0)) + 1
+                    if int(item.get("failureCount", 0)) >= int(item.get("maxRetryCount", 50)):
+                        item["status"] = "failed"
+                    else:
+                        item["nextAttemptAt"] = compute_next_attempt(item)
+                item["updatedAt"] = datetime.now().isoformat()
+        finally:
+            with queue_lock:
+                processing_item_ids.discard(item_id)
+
+    save_throttle_last = 0
+    while True:
+        now = time.time()
+        with queue_lock:
+            items = list(queue)
+        runnable = []
+        for it in items:
+            if it.get("status") != "running":
+                continue
+            if int(it.get("purchased", 0)) >= int(it.get("quantity", 1)):
+                continue
+            nxt = float(it.get("nextAttemptAt") or 0)
+            if nxt == 0 or now >= nxt:
+                if it["id"] not in processing_item_ids and it["id"] not in deleted_task_ids:
+                    runnable.append(it)
+        runnable.sort(key=lambda it: (
+            0 if it.get("quickOrder") else 1,
+            -int(datetime.fromisoformat(it.get("createdAt")).timestamp()) if it.get("createdAt") else 0
+        ))
+        capacity = max(0, 3 - len(processing_item_ids))
+        for it in runnable[:capacity]:
+            with queue_lock:
+                processing_item_ids.add(it["id"])
+            executor.submit(execute_queue_item, it["id"])
+
+        if now - save_throttle_last >= 1.0:
+            save_data()
+            update_stats()
+            save_throttle_last = now
+        time.sleep(1)
 
 # Start queue processing thread
 def start_queue_processor():
@@ -2557,50 +2571,52 @@ def get_settings():
 @app.route('/api/settings', methods=['POST'])
 def save_settings():
     global config
-    data = request.json
-    
-    # Store previous TG settings to check if they changed
+    data = request.json or {}
+
     prev_tg_token = config.get("tgToken")
     prev_tg_chat_id = config.get("tgChatId")
 
-    # Update config
-    config = {
-        "appKey": data.get("appKey", ""),
-        "appSecret": data.get("appSecret", ""),
-        "consumerKey": data.get("consumerKey", ""),
-        "endpoint": data.get("endpoint", "ovh-eu"),
-        "tgToken": data.get("tgToken", ""),
-        "tgChatId": data.get("tgChatId", ""),
-        "iam": data.get("iam", "go-ovh-ie"),
-        "zone": data.get("zone", "IE")
-    }
-    
-    # Auto-generate IAM if not set
-    if not config["iam"]:
-        config["iam"] = f"go-ovh-{config['zone'].lower()}"
-    
-    save_data()
-    add_log("INFO", "API settings updated in config.json") # Clarified log message
+    # 仅更新提供的字段，未提供的字段保持原值
+    if data.get("appKey") is not None:
+        config["appKey"] = data.get("appKey")
+    if data.get("appSecret") is not None:
+        config["appSecret"] = data.get("appSecret")
+    if data.get("consumerKey") is not None:
+        config["consumerKey"] = data.get("consumerKey")
+    if data.get("endpoint") is not None:
+        config["endpoint"] = data.get("endpoint") or "ovh-eu"
+    if data.get("tgToken") is not None:
+        config["tgToken"] = data.get("tgToken")
+    if data.get("tgChatId") is not None:
+        config["tgChatId"] = data.get("tgChatId")
+    if data.get("iam") is not None:
+        config["iam"] = data.get("iam")
+    if data.get("zone") is not None:
+        config["zone"] = data.get("zone") or "IE"
 
-    # Check if Telegram settings are present and if they have changed or were just set
+    # 自动生成 IAM（当为空时）
+    if not config.get("iam"):
+        zone_val = (config.get("zone") or "IE").lower()
+        config["iam"] = f"go-ovh-{zone_val}"
+
+    save_data()
+    add_log("INFO", "API 设置已更新并写入 config.json")
+
     current_tg_token = config.get("tgToken")
     current_tg_chat_id = config.get("tgChatId")
-
     if current_tg_token and current_tg_chat_id:
-        # Send test message if token or chat id is newly set or changed
-        if (current_tg_token != prev_tg_token) or (current_tg_chat_id != prev_tg_chat_id) or not prev_tg_token or not prev_tg_chat_id :
-            add_log("INFO", f"Telegram Token或Chat ID已更新/设置。尝试发送Telegram测试消息到 Chat ID: {current_tg_chat_id}")
-            test_message_content = "OVH Phantom Sniper: Telegram 通知已成功配置 (来自 app.py 测试)"
-            test_result = send_telegram_msg(test_message_content) # Call the移植过来的 function
+        if (current_tg_token != prev_tg_token) or (current_tg_chat_id != prev_tg_chat_id) or not prev_tg_token or not prev_tg_chat_id:
+            add_log("INFO", f"Telegram Token 或 Chat ID 更新，发送测试消息到: {current_tg_chat_id}")
+            test_result = send_telegram_msg("OVH Phantom Sniper: Telegram 通知已成功配置 (测试)")
             if test_result:
-                add_log("INFO", "Telegram 测试消息发送成功。")
+                add_log("INFO", "Telegram 测试消息发送成功")
             else:
-                add_log("WARNING", "Telegram 测试消息发送失败。请检查 Token 和 Chat ID 以及后端日志。")
+                add_log("WARNING", "Telegram 测试消息发送失败，请检查配置")
         else:
-            add_log("INFO", "Telegram 配置未更改，跳过测试消息。")
+            add_log("INFO", "Telegram 配置未更改，跳过测试消息")
     else:
-        add_log("INFO", "未配置 Telegram Token 或 Chat ID，跳过测试消息。")
-    
+        add_log("INFO", "未配置 Telegram Token 或 Chat ID，跳过测试消息")
+
     return jsonify({"status": "success"})
 
 @app.route('/api/verify-auth', methods=['POST'])
@@ -2706,12 +2722,12 @@ def add_queue_item():
     account_id = get_account_id_from_request()
     
     dcs = data.get("datacenters") or []
-    # 规范化每次下单数量（1-4）
+    # 抢购单量（目标总台数，1-100）
     try:
         qty = int(data.get("quantity", 1))
     except Exception:
         qty = 1
-    qty = max(1, min(qty, 4))
+    qty = max(1, min(qty, 100))
 
     queue_item = {
         "id": str(uuid.uuid4()),
@@ -2719,6 +2735,10 @@ def add_queue_item():
         "datacenters": dcs,
         "options": data.get("options", []),
         "quantity": qty,
+        "purchased": 0,
+        "failureCount": 0,
+        "nextAttemptAt": 0,
+        "maxRetryCount": int(data.get("maxRetryCount", 50)),
         "auto_pay": data.get("auto_pay", False),
         "status": "running",  # 直接设置为 running
         "createdAt": datetime.now().isoformat(),
@@ -2827,11 +2847,14 @@ def update_queue_item(id):
             q = int(data.get("quantity"))
         except Exception:
             q = 1
-        item["quantity"] = max(1, min(q, 4))
+        item["quantity"] = max(1, min(q, 100))
     item["updatedAt"] = datetime.now().isoformat()
     # 编辑后重置计数，以便按新配置重新调度
     item["retryCount"] = 0
     item["lastCheckTime"] = 0
+    item["nextAttemptAt"] = 0
+    if int(item.get("purchased", 0)) >= int(item.get("quantity", 1)):
+        item["status"] = "completed"
 
     save_data()
     update_stats()
@@ -9174,8 +9197,15 @@ def get_account_bills():
 @app.route('/api/accounts', methods=['GET', 'POST'])
 def accounts_api():
     if request.method == 'GET':
+        # 返回时剔除与通知无关的字段（统一使用全局TG配置）
+        sanitized = []
+        for acc in accounts.values():
+            a = dict(acc)
+            a.pop('tgToken', None)
+            a.pop('tgChatId', None)
+            sanitized.append(a)
         return jsonify({
-            "accounts": list(accounts.values())
+            "accounts": sanitized
         })
     data = request.json or {}
     acc_id = data.get('id')
@@ -9217,9 +9247,7 @@ def accounts_api():
         "appSecret": data.get('appSecret', ''),
         "consumerKey": data.get('consumerKey', ''),
         "endpoint": data.get('endpoint', 'ovh-eu'),
-        "zone": data.get('zone', 'IE'),
-        "tgToken": data.get('tgToken', ''),
-        "tgChatId": data.get('tgChatId', '')
+        "zone": data.get('zone', 'IE')
     }
     save_accounts()
     return jsonify({"success": True, "account": accounts[acc_id]})

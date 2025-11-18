@@ -298,28 +298,29 @@ const Dashboard = () => {
                           <circle cx="12" cy="12" r="10"></circle>
                           <polyline points="12 6 12 12 16 14"></polyline>
                         </svg>
-                        
-                      {(() => {
-                        const list = Array.isArray(item.datacenters) && item.datacenters.length > 0 ? item.datacenters : (item.datacenter ? [item.datacenter] : []);
-                        if (list.length > 1) {
-                          return (
-                            <span className="ml-2 px-2 py-0.5 text-[11px] bg-cyber-accent/20 text-cyber-accent rounded-full">
-                              机房优先级：{list.map(dc => dc.toUpperCase()).join(' > ')}
-                            </span>
-                          );
-                        }
-                        if (list.length === 1) {
-                          return (
-                            <span className="ml-2 px-2 py-0.5 text-[11px] bg-cyber-accent/20 text-cyber-accent rounded-full">
-                              机房：{list[0].toUpperCase()}
-                            </span>
-                          );
-                        }
-                        return null;
-                      })()}
+                        <span className="ml-2 px-2 py-0.5 text-[11px] bg-cyber-accent/20 text-cyber-accent rounded-full">
+                          第 {item.retryCount + 1} 次尝试
+                        </span>
+                        <span className="text-cyber-grid">•</span>
+                        {(() => {
+                          const list = Array.isArray(item.datacenters) && item.datacenters.length > 0 ? item.datacenters : (item.datacenter ? [item.datacenter] : []);
+                          if (list.length > 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[11px] bg-cyber-accent/20 text-cyber-accent rounded-full">
+                                机房优先级：{list.map(dc => dc.toUpperCase()).join(' > ')}
+                              </span>
+                            );
+                          }
+                          if (list.length === 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[11px] bg-cyber-accent/20 text-cyber-accent rounded-full">
+                                机房：{list[0].toUpperCase()}
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
                       </span>
-                      <span className="text-cyber-grid">•</span>
-                      <span>第 {item.retryCount + 1} 次尝试</span>
                       <span className="text-cyber-grid">•</span>
                     </div>
                   </div>

@@ -58,9 +58,7 @@ const SettingsPage = () => {
     appSecret: "",
     consumerKey: "",
     endpoint: "ovh-eu",
-    zone: "IE",
-    tgToken: "",
-    tgChatId: ""
+    zone: "IE"
   });
   const [isSubmittingAccount, setIsSubmittingAccount] = useState(false);
   
@@ -286,12 +284,17 @@ const SettingsPage = () => {
           setOvhAuthValid(false);
         }
       } else {
-        // 如果没填写 OVH API，只保存了访问密码
-        toast.success("访问密码已保存，页面将刷新");
-        // 延迟刷新让用户看到提示
-        setTimeout(() => {
-          window.location.reload();
-        }, 800);
+        // 未填写 OVH API：也要保存 Telegram 配置到后端（部分更新）
+        try {
+          await api.post('/settings', {
+            tgToken: formValues.tgToken || undefined,
+            tgChatId: formValues.tgChatId || undefined
+          });
+          toast.success("访问密码与Telegram配置已保存，页面将刷新");
+        } catch (err) {
+          toast.error("保存Telegram配置失败");
+        }
+        setTimeout(() => { window.location.reload(); }, 800);
       }
     } catch (error) {
       console.error("Error saving settings:", error);

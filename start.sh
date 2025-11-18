@@ -77,14 +77,20 @@ fi
 echo "后台启动后端服务..."
 echo "后端日志保存到：$BACKEND_DIR/backend.log"
 
-nohup python3 app.py >&1 &
+# 使用 nohup 并重定向到指定日志文件，避免写入 nohup.out
+nohup python3 app.py > "$BACKEND_DIR/backend.log" 2>&1 &
 BACK_PID=$!
-sleep 2 # Give it a moment to start or fail
+sleep 3 # 给后端更多时间初始化
 
 # 检查后端进程是否仍在运行
 if ! kill -0 $BACK_PID 2>/dev/null; then
-    echo "错误：后端服务启动失败。请查看日志：$BACKEND_DIR/backend/logs/app.log"
+    echo "错误：后端服务启动失败。请查看日志：$BACKEND_DIR/backend.log 与 $BACKEND_DIR/logs/app.log"
     exit 1
+fi
+
+# 额外检查端口是否已监听
+if ! curl -s -I "http://127.0.0.1:$BACKEND_PORT" >/dev/null 2>&1; then
+  echo "警告：后端端口尚未就绪，稍后前端可能无法连接。日志：$BACKEND_DIR/backend.log"
 fi
 echo "后端服务已启动，进程 PID:$BACK_PID"
 
