@@ -445,11 +445,13 @@ def load_data():
     logging.info("Data loaded from files")
 
 # Save data to files
-def save_data():
+def save_data(do_flush=True):
+    global last_saved_ts
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
-        flush_logs()  # 使用批量刷新函数
+        if do_flush:
+            flush_logs()
         with open(QUEUE_FILE, 'w', encoding='utf-8') as f:
             json.dump(queue, f, ensure_ascii=False, indent=2)
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
@@ -483,6 +485,7 @@ def save_data():
                     json.dump(items, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logging.error(f"分账号保存队列和历史失败: {str(e)}")
+        last_saved_ts = time.time()
         logging.info("Data saved to files")
     except Exception as e:
         logging.error(f"保存数据时出错: {str(e)}")
@@ -546,6 +549,7 @@ def save_accounts():
 # 日志缓冲区：批量写入以提高性能
 log_write_counter = 0
 LOG_WRITE_THRESHOLD = 10  # 每10条日志写一次文件
+last_saved_ts = 0
 
 # Add a log entry
 def add_log(level, message, source="system"):
@@ -1335,6 +1339,7 @@ def purchase_server(queue_item):
 # Process queue items
 def process_queue():
     global deleted_task_ids
+    changes_since_last_save = False
     def get_account_sem(account_id):
         if account_id not in account_checkout_semaphores:
             account_checkout_semaphores[account_id] = threading.Semaphore(1)
@@ -1348,6 +1353,7 @@ def process_queue():
         return time.time() + interval * jitter
 
     def execute_queue_item(item_id):
+        nonlocal changes_since_last_save
         try:
             with queue_lock:
                 item = next((x for x in queue if x["id"] == item_id), None)
@@ -1359,6 +1365,7 @@ def process_queue():
                 with queue_lock:
                     item["status"] = "completed"
                     item["updatedAt"] = datetime.now().isoformat()
+                    changes_since_last_save = True
                 return
             acc_id = item.get("accountId")
             sem = get_account_sem(acc_id)
@@ -1384,11 +1391,11 @@ def process_queue():
                     else:
                         item["nextAttemptAt"] = compute_next_attempt(item)
                 item["updatedAt"] = datetime.now().isoformat()
+                changes_since_last_save = True
         finally:
             with queue_lock:
                 processing_item_ids.discard(item_id)
 
-    save_throttle_last = 0
     while True:
         now = time.time()
         with queue_lock:
@@ -1413,10 +1420,10 @@ def process_queue():
                 processing_item_ids.add(it["id"])
             executor.submit(execute_queue_item, it["id"])
 
-        if now - save_throttle_last >= 1.0:
-            save_data()
+        if now - last_saved_ts >= 5.0 and changes_since_last_save:
+            save_data(False)
             update_stats()
-            save_throttle_last = now
+            changes_since_last_save = False
         time.sleep(1)
 
 # Start queue processing thread
