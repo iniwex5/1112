@@ -6,6 +6,8 @@ import { api } from "@/utils/apiClient";
 import { toast } from "sonner";
 import { XIcon, RefreshCwIcon, PlusIcon, SearchIcon, PlayIcon, PauseIcon, Trash2Icon, ArrowUpDownIcon, HeartIcon, Settings, Cpu, Database, HardDrive, Wifi, ArrowRightLeft, CheckSquare, Check, ShoppingCart } from 'lucide-react';
 import { useIsMobile } from "@/hooks/use-mobile";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { 
   API_URL, 
   TASK_RETRY_INTERVAL, 
@@ -83,6 +85,20 @@ const QueuePage = () => {
   const [showClearConfirm, setShowClearConfirm] = useState(false); // 清空确认对话框
   const [isGettingConfig, setIsGettingConfig] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [runningItems, setRunningItems] = useState<QueueItem[]>([]);
+  const [completedItems, setCompletedItems] = useState<QueueItem[]>([]);
+  const [pausedItems, setPausedItems] = useState<QueueItem[]>([]);
+  const [runningPage, setRunningPage] = useState<number>(1);
+  const [completedPage, setCompletedPage] = useState<number>(1);
+  const [pausedPage, setPausedPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [runningTotal, setRunningTotal] = useState<number>(0);
+  const [completedTotal, setCompletedTotal] = useState<number>(0);
+  const [pausedTotal, setPausedTotal] = useState<number>(0);
+  const [runningTotalPages, setRunningTotalPages] = useState<number>(1);
+  const [completedTotalPages, setCompletedTotalPages] = useState<number>(1);
+  const [pausedTotalPages, setPausedTotalPages] = useState<number>(1);
+  const [activeTab, setActiveTab] = useState<'running' | 'completed' | 'paused'>('running');
 
   const getAccountLabel = (id?: string) => {
     if (!id) return '默认账户';
@@ -107,6 +123,20 @@ const QueuePage = () => {
     try {
       const response = await api.get(`/queue`);
       setQueueItems(response.data);
+      try {
+        const runningResp = await api.get(`/queue/paged`, { params: { status: 'running', page: runningPage, pageSize } });
+        const completedResp = await api.get(`/queue/paged`, { params: { status: 'completed', page: completedPage, pageSize } });
+        const pausedResp = await api.get(`/queue/paged`, { params: { status: 'paused', page: pausedPage, pageSize } });
+        setRunningItems(runningResp.data.items || []);
+        setCompletedItems(completedResp.data.items || []);
+        setPausedItems(pausedResp.data.items || []);
+        setRunningTotal(runningResp.data.total || 0);
+        setCompletedTotal(completedResp.data.total || 0);
+        setPausedTotal(pausedResp.data.total || 0);
+        setRunningTotalPages(runningResp.data.totalPages || 1);
+        setCompletedTotalPages(completedResp.data.totalPages || 1);
+        setPausedTotalPages(pausedResp.data.totalPages || 1);
+      } catch {}
     } catch (error) {
       console.error("Error fetching queue items:", error);
       toast.error("获取队列失败");
@@ -287,6 +317,39 @@ const QueuePage = () => {
     const interval = setInterval(fetchQueueItems, QUEUE_POLLING_INTERVAL);
     return () => clearInterval(interval);
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const runningResp = await api.get(`/queue/paged`, { params: { status: 'running', page: runningPage, pageSize } });
+        setRunningItems(runningResp.data.items || []);
+        setRunningTotal(runningResp.data.total || 0);
+        setRunningTotalPages(runningResp.data.totalPages || 1);
+      } catch {}
+    })();
+  }, [runningPage, pageSize]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const completedResp = await api.get(`/queue/paged`, { params: { status: 'completed', page: completedPage, pageSize } });
+        setCompletedItems(completedResp.data.items || []);
+        setCompletedTotal(completedResp.data.total || 0);
+        setCompletedTotalPages(completedResp.data.totalPages || 1);
+      } catch {}
+    })();
+  }, [completedPage, pageSize]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const pausedResp = await api.get(`/queue/paged`, { params: { status: 'paused', page: pausedPage, pageSize } });
+        setPausedItems(pausedResp.data.items || []);
+        setPausedTotal(pausedResp.data.total || 0);
+        setPausedTotalPages(pausedResp.data.totalPages || 1);
+      } catch {}
+    })();
+  }, [pausedPage, pageSize]);
 
   // Update selectedServer and visible datacenters when planCodeInput or servers list changes
   useEffect(() => {
@@ -868,131 +931,331 @@ const QueuePage = () => {
             </div>
           </div>
         ) : (
-          <div className="space-y-3">
-            {queueItems.map(item => (
-              <div 
-                key={item.id}
-                id={`queue-item-${item.id}`}
-                className={`relative bg-cyber-surface p-4 rounded-lg shadow-md border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${editingItemId === item.id ? 'border-cyber-accent/60 ring-2 ring-cyber-accent/30 bg-cyber-accent/5 shadow-[0_0_16px_rgba(56,189,248,0.25)]' : 'border-cyber-border'}`}
-              >
-                {editingItemId === item.id && (
-                  <span className="pointer-events-none absolute inset-0 rounded-lg animate-pulse bg-cyber-accent/5"></span>
-                )}
-                <div className="flex-grow">
-                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <div className="space-y-6">
+            <div>
+              <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'running' | 'completed' | 'paused')} className="w-full">
+                <TabsList className="grid w-full grid-cols-3 cyber-card">
+                  <TabsTrigger value="running" className="data-[state=active]:bg-cyber-accent/20">正在进行</TabsTrigger>
+                  <TabsTrigger value="paused" className="data-[state=active]:bg-cyber-accent/20">已暂停</TabsTrigger>
+                  <TabsTrigger value="completed" className="data-[state=active]:bg-cyber-accent/20">已完成</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            {activeTab === 'running' && (
+            <Card className="cyber-card">
+              <CardHeader>
+                <CardTitle className="flex items-center">
+                  <span className="text-sm font-semibold text-cyber-text">正在进行</span>
+                  <span className="ml-2 text-xs text-cyber-muted">共 {runningTotal} 项</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {runningItems.map(item => (
+                  <div 
+                    key={item.id}
+                    id={`queue-item-${item.id}`}
+                    className={`relative bg-cyber-surface p-4 rounded-lg shadow-md border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${editingItemId === item.id ? 'border-cyber-accent/60 ring-2 ring-cyber-accent/30 bg-cyber-accent/5 shadow-[0_0_16px_rgba(56,189,248,0.25)]' : 'border-cyber-border'}`}
+                  >
                     {editingItemId === item.id && (
-                      <span className="px-2 py-0.5 text-[10px] rounded-md bg-blue-500/20 text-blue-400 border border-blue-400/40">
-                        编辑中
-                      </span>
+                      <span className="pointer-events-none absolute inset-0 rounded-lg animate-pulse bg-cyber-accent/5"></span>
                     )}
-                    <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                      {item.planCode}
-                    </span>
-                    {(() => {
-                      const s = servers.find(ss => ss.planCode === item.planCode);
-                      const name = s?.name;
-                      if (!name) return null;
-                      return (
-                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                          {name}
+                    <div className="flex-grow">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{item.planCode}</span>
+                        {(() => {
+                          const s = servers.find(ss => ss.planCode === item.planCode);
+                          const name = s?.name;
+                          if (!name) return null;
+                          return (
+                            <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{name}</span>
+                          );
+                        })()}
+                        {(() => {
+                          const list = Array.isArray(item.datacenters) && item.datacenters.length > 0 ? item.datacenters : (item.datacenter ? [item.datacenter] : []);
+                          if (list.length > 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">机房优先级：{list.map(dc => dc.toUpperCase()).join(' > ')}</span>
+                            );
+                          }
+                          if (list.length === 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">机房：{list[0].toUpperCase()}</span>
+                            );
+                          }
+                          return null;
+                        })()}
+                        {Array.isArray(item.options) && item.options.length > 0 && (
+                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">含 {item.options.length} 个可选配置</span>
+                        )}
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30 flex items-center gap-1">
+                          <ShoppingCart size={12} /> {Math.min(item.purchased || 0, item.quantity || 0)} / {item.quantity || 0}
                         </span>
-                      );
-                    })()}
-                    {(() => {
-                      const list = Array.isArray(item.datacenters) && item.datacenters.length > 0 ? item.datacenters : (item.datacenter ? [item.datacenter] : []);
-                      if (list.length > 1) {
+                      </div>
+                      <p className="text-xs text-cyber-muted">
+                        {(() => {
+                          const now = Date.now() / 1000;
+                          const next = typeof item.nextAttemptAt === 'number' ? item.nextAttemptAt : 0;
+                          if (item.status !== 'running') return `状态: ${item.status} | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                          if (!next || next <= now) return `下次尝试: 即将开始 | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                          const diff = Math.max(0, Math.round(next - now));
+                          return `下次尝试: ${diff} 秒后 (第${(item.retryCount || 0) + 1}次) | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
+                        })()}
+                      </p>
+                      {Array.isArray(item.options) && item.options.length > 0 && (
+                        <p className="text-xs text-cyber-muted mt-1">📦 可选配置: {item.options.join(', ')}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-2 sm:mt-0 flex-shrink-0">
+                      <span className="px-2 py-0.5 text-xs bg-slate-600/30 text-slate-200 rounded-full">账户：{getAccountLabel(item.accountId)}</span>
+                      {(() => {
+                        const zone = getAccountZone(item.accountId);
+                        if (!zone) return null;
                         return (
                           <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                            机房优先级：{list.map(dc => dc.toUpperCase()).join(' > ')}
+                            {zone}
                           </span>
                         );
-                      }
-                      if (list.length === 1) {
-                        return (
-                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                            机房：{list[0].toUpperCase()}
-                          </span>
-                        );
-                      }
-                      return null;
-                    })()}
-                    {Array.isArray(item.options) && item.options.length > 0 && (
-                      <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                        含 {item.options.length} 个可选配置
-                      </span>
-                    )}
-                    <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30 flex items-center gap-1">
-                      <ShoppingCart size={12} /> {Math.min(item.purchased || 0, item.quantity || 0)} / {item.quantity || 0}
-                    </span>
+                      })()}
+                      <span className={`text-xs px-2 py-1 rounded-full font-medium bg-green-500/20 text-green-400`}>运行中</span>
+                      <button 
+                        onClick={() => toggleQueueItemStatus(item.id, item.status)}
+                        className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors"
+                        title={item.status === 'running' ? "暂停" : "启动"}
+                      >
+                        {item.status === 'running' ? <PauseIcon size={16} /> : <PlayIcon size={16} />}
+                      </button>
+                      <button
+                        onClick={() => beginEditQueueItem(item)}
+                        className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors"
+                        title="编辑"
+                      >
+                        <Settings size={16} />
+                      </button>
+                      <button 
+                        onClick={() => removeQueueItem(item.id)}
+                        className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-red-500 transition-colors"
+                        title="移除"
+                      >
+                        <Trash2Icon size={16} />
+                      </button>
+                    </div>
                   </div>
-                  <p className="text-xs text-cyber-muted">
-                    {(() => {
-                      const now = Date.now() / 1000;
-                      const next = typeof item.nextAttemptAt === 'number' ? item.nextAttemptAt : 0;
-                      if (item.status !== 'running') return `状态: ${item.status} | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
-                      if (!next || next <= now) return `下次尝试: 即将开始 | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
-                      const diff = Math.max(0, Math.round(next - now));
-                      return `下次尝试: ${diff} 秒后 (第${(item.retryCount || 0) + 1}次) | 创建于: ${new Date(item.createdAt || Date.now()).toLocaleString()}`;
-                    })()}
-                  </p>
-                  {Array.isArray(item.options) && item.options.length > 0 && (
-                    <p className="text-xs text-cyber-muted mt-1">
-                      📦 可选配置: {item.options.join(', ')}
-                    </p>
-                  )}
+                ))}
+                {runningItems.length === 0 && (
+                  <div className="text-center py-8 text-cyber-muted">暂无进行中的任务</div>
+                )}
+                <div className="flex items-center justify-between mt-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-cyber-muted">每页</span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => { const v = Number(e.target.value) || 10; setPageSize(v); setRunningPage(1); setCompletedPage(1); setPausedPage(1); }}
+                      className="px-2 py-1 bg-cyber-bg border border-cyber-accent/30 rounded text-cyber-text"
+                    >
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button className="cyber-button text-xs px-2 py-1" disabled={runningPage <= 1} onClick={() => setRunningPage(p => Math.max(1, p - 1))}>上一页</button>
+                    <span className="text-cyber-muted">{runningPage} / {runningTotalPages}</span>
+                    <button className="cyber-button text-xs px-2 py-1" disabled={runningPage >= runningTotalPages} onClick={() => setRunningPage(p => Math.min(runningTotalPages, p + 1))}>下一页</button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 mt-2 sm:mt-0 flex-shrink-0">
-                  <span className="px-2 py-0.5 text-xs bg-slate-600/30 text-slate-200 rounded-full">
-                    账户：{getAccountLabel(item.accountId)}
-                  </span>
-                  {(() => {
-                    const zone = getAccountZone(item.accountId);
-                    if (!zone) return null;
-                    return (
-                      <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
-                        {zone}
-                      </span>
-                    );
-                  })()}
-                  <span 
-                     className={`text-xs px-2 py-1 rounded-full font-medium
-                      ${item.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
-                        item.status === 'running' ? 'bg-green-500/20 text-green-400' :
-                        item.status === 'paused' ? 'bg-orange-500/20 text-orange-400' :
-                        item.status === 'completed' ? 'bg-blue-500/20 text-blue-400' :
-                        item.status === 'failed' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-400'}
-                     `}
+              </CardContent>
+            </Card>
+            )}
+
+            {activeTab === 'completed' && (
+            <Card className="cyber-card">
+              <CardHeader>
+                <CardTitle className="flex items-center">
+                  <span className="text-sm font-semibold text-cyber-text">已完成</span>
+                  <span className="ml-2 text-xs text-cyber-muted">共 {completedTotal} 项</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {completedItems.map(item => (
+                  <div 
+                    key={item.id}
+                    id={`queue-item-${item.id}`}
+                    className={`relative bg-cyber-surface p-4 rounded-lg shadow-md border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-cyber-border`}
                   >
-                    {item.status === "pending" && "待命中"}
-                    {item.status === "running" && "运行中"}
-                    {item.status === "paused" && "已暂停"}
-                    {item.status === "completed" && "已完成"}
-                    {item.status === "failed" && "失败"}
-                  </span>
-                  <button 
-                    onClick={() => toggleQueueItemStatus(item.id, item.status)}
-                    className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors"
-                    title={item.status === 'running' ? "暂停" : item.status === 'paused' ? "恢复" : "启动"}
-                  >
-                    {item.status === 'running' ? <PauseIcon size={16} /> : <PlayIcon size={16} />}
-                  </button>
-                  <button
-                    onClick={() => beginEditQueueItem(item)}
-                    className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors"
-                    title="编辑"
-                  >
-                    <Settings size={16} />
-                  </button>
-                  <button 
-                    onClick={() => removeQueueItem(item.id)}
-                    className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-red-500 transition-colors"
-                    title="移除"
-                  >
-                    <Trash2Icon size={16} />
-                  </button>
+                    <div className="flex-grow">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{item.planCode}</span>
+                        {(() => {
+                          const s = servers.find(ss => ss.planCode === item.planCode);
+                          const name = s?.name;
+                          if (!name) return null;
+                          return (
+                            <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{name}</span>
+                          );
+                        })()}
+                        {(() => {
+                          const list = Array.isArray(item.datacenters) && item.datacenters.length > 0 ? item.datacenters : (item.datacenter ? [item.datacenter] : []);
+                          if (list.length > 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">机房优先级：{list.map(dc => dc.toUpperCase()).join(' > ')}</span>
+                            );
+                          }
+                          if (list.length === 1) {
+                            return (
+                              <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">机房：{list[0].toUpperCase()}</span>
+                            );
+                          }
+                          return null;
+                        })()}
+                        {Array.isArray(item.options) && item.options.length > 0 && (
+                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">含 {item.options.length} 个可选配置</span>
+                        )}
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30 flex items-center gap-1">
+                          <ShoppingCart size={12} /> {Math.min(item.purchased || 0, item.quantity || 0)} / {item.quantity || 0}
+                        </span>
+                      </div>
+                      <p className="text-xs text-cyber-muted">状态: 已完成 | 创建于: {new Date(item.createdAt || Date.now()).toLocaleString()}</p>
+                    </div>
+                    <div className="flex items-center gap-2 mt-2 sm:mt-0 flex-shrink-0">
+                      <span className="text-xs px-2 py-1 rounded-full font-medium bg-blue-500/20 text-blue-400">已完成</span>
+                      <span className="px-2 py-0.5 text-xs bg-slate-600/30 text-slate-200 rounded-full">账户：{getAccountLabel(item.accountId)}</span>
+                      {(() => {
+                        const zone = getAccountZone(item.accountId);
+                        if (!zone) return null;
+                        return (
+                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
+                            {zone}
+                          </span>
+                        );
+                      })()}
+                      <button 
+                        onClick={async () => { await api.put(`/queue/${item.id}/restart`); toast.success('已重新开始任务，并清空计数'); fetchQueueItems(true); }}
+                        className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-green-400 transition-colors"
+                        title="重新开始"
+                      >
+                        <PlayIcon size={16} />
+                      </button>
+                      <button onClick={() => beginEditQueueItem(item)} className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors" title="编辑"><Settings size={16} /></button>
+                      <button onClick={() => removeQueueItem(item.id)} className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-red-500 transition-colors" title="移除"><Trash2Icon size={16} /></button>
+                    </div>
+                  </div>
+                ))}
+                {completedItems.length === 0 && (
+                  <div className="text-center py-8 text-cyber-muted">暂无已完成任务</div>
+                )}
+                <div className="flex items-center justify-between mt-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-cyber-muted">每页</span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => { const v = Number(e.target.value) || 10; setPageSize(v); setCompletedPage(1); setRunningPage(1); setPausedPage(1); }}
+                      className="px-2 py-1 bg-cyber-bg border border-cyber-accent/30 rounded text-cyber-text"
+                    >
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button className="cyber-button text-xs px-2 py-1" disabled={completedPage <= 1} onClick={() => setCompletedPage(p => Math.max(1, p - 1))}>上一页</button>
+                    <span className="text-cyber-muted">{completedPage} / {completedTotalPages}</span>
+                    <button className="cyber-button text-xs px-2 py-1" disabled={completedPage >= completedTotalPages} onClick={() => setCompletedPage(p => Math.min(completedTotalPages, p + 1))}>下一页</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              </CardContent>
+            </Card>
+            )}
+
+            {activeTab === 'paused' && (
+            <Card className="cyber-card">
+              <CardHeader>
+                <CardTitle className="flex items-center">
+                  <span className="text-sm font-semibold text-cyber-text">已暂停</span>
+                  <span className="ml-2 text-xs text-cyber-muted">共 {pausedTotal} 项</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {pausedItems.map(item => (
+                  <div 
+                    key={item.id}
+                    id={`queue-item-${item.id}`}
+                    className={`relative bg-cyber-surface p-4 rounded-lg shadow-md border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-cyber-border`}
+                  >
+                    <div className="flex-grow">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{item.planCode}</span>
+                        {(() => {
+                          const s = servers.find(ss => ss.planCode === item.planCode);
+                          const name = s?.name;
+                          if (!name) return null;
+                          return (
+                            <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">{name}</span>
+                          );
+                        })()}
+                        {Array.isArray(item.options) && item.options.length > 0 && (
+                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">含 {item.options.length} 个可选配置</span>
+                        )}
+                        <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30 flex items-center gap-1">
+                          <ShoppingCart size={12} /> {Math.min(item.purchased || 0, item.quantity || 0)} / {item.quantity || 0}
+                        </span>
+                      </div>
+                      <p className="text-xs text-cyber-muted">状态: 已暂停 | 创建于: {new Date(item.createdAt || Date.now()).toLocaleString()}</p>
+                      {Array.isArray(item.options) && item.options.length > 0 && (
+                        <p className="text-xs text-cyber-muted mt-1">📦 可选配置: {item.options.join(', ')}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-2 sm:mt-0 flex-shrink-0">
+                      <span className="text-xs px-2 py-1 rounded-full font-medium bg-yellow-500/20 text-yellow-400">已暂停</span>
+                      <span className="px-2 py-0.5 text-xs bg-slate-600/30 text-slate-200 rounded-full">账户：{getAccountLabel(item.accountId)}</span>
+                      {(() => {
+                        const zone = getAccountZone(item.accountId);
+                        if (!zone) return null;
+                        return (
+                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/30">
+                            {zone}
+                          </span>
+                        );
+                      })()}
+                      <button 
+                        onClick={() => toggleQueueItemStatus(item.id, item.status)}
+                        className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors"
+                        title={item.status === 'running' ? "暂停" : "启动"}
+                      >
+                        {item.status === 'running' ? <PauseIcon size={16} /> : <PlayIcon size={16} />}
+                      </button>
+                      <button onClick={() => beginEditQueueItem(item)} className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-cyber-primary transition-colors" title="编辑"><Settings size={16} /></button>
+                      <button onClick={() => removeQueueItem(item.id)} className="p-1.5 hover:bg-cyber-hover rounded text-cyber-secondary hover:text-red-500 transition-colors" title="移除"><Trash2Icon size={16} /></button>
+                    </div>
+                  </div>
+                ))}
+                {pausedItems.length === 0 && (
+                  <div className="text-center py-8 text-cyber-muted">暂无已暂停任务</div>
+                )}
+                <div className="flex items-center justify-between mt-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-cyber-muted">每页</span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => { const v = Number(e.target.value) || 10; setPageSize(v); setPausedPage(1); setRunningPage(1); setCompletedPage(1); }}
+                      className="px-2 py-1 bg-cyber-bg border border-cyber-accent/30 rounded text-cyber-text"
+                    >
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button className="cyber-button text-xs px-2 py-1" disabled={pausedPage <= 1} onClick={() => setPausedPage(p => Math.max(1, p - 1))}>上一页</button>
+                    <span className="text-cyber-muted">{pausedPage} / {pausedTotalPages}</span>
+                    <button className="cyber-button text-xs px-2 py-1" disabled={pausedPage >= pausedTotalPages} onClick={() => setPausedPage(p => Math.min(pausedTotalPages, p + 1))}>下一页</button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            )}
           </div>
         )}
       </div>

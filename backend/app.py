@@ -2745,6 +2745,67 @@ def get_queue():
             dedup.append(it)
     return jsonify(dedup)
 
+@app.route('/api/queue/paged', methods=['GET'])
+def get_queue_paged():
+    """分页获取队列项，支持按状态过滤
+
+    Query 参数：
+      - status: 可选值 all|running|completed|failed|paused|pending，默认 all
+      - page: 页码，从 1 开始，默认 1
+      - pageSize: 每页数量，默认 10
+    """
+    try:
+        status = (request.args.get('status') or 'all').lower()
+        page = int(request.args.get('page') or 1)
+        page_size = int(request.args.get('pageSize') or 10)
+        page = max(1, page)
+        page_size = max(1, min(page_size, 100))
+
+        account_id = get_account_id_from_request()
+        items_src = queue
+        if account_id:
+            items_src = [item for item in items_src if item.get('accountId') == account_id]
+
+        # 去重
+        seen = set()
+        items = []
+        for it in items_src:
+            iid = it.get('id')
+            if iid and iid not in seen:
+                seen.add(iid)
+                items.append(it)
+
+        # 状态过滤
+        if status != 'all':
+            items = [it for it in items if str(it.get('status', '')).lower() == status]
+
+        # 排序：先按 updatedAt 降序，再按 createdAt 降序
+        def _ts(s):
+            try:
+                return datetime.fromisoformat(s).timestamp()
+            except Exception:
+                return 0
+        items.sort(key=lambda it: (
+            -_ts(it.get('updatedAt', '')), -_ts(it.get('createdAt', ''))
+        ))
+
+        total = len(items)
+        total_pages = (total + page_size - 1) // page_size
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged_items = items[start:end]
+
+        return jsonify({
+            'items': paged_items,
+            'page': page,
+            'pageSize': page_size,
+            'total': total,
+            'totalPages': total_pages
+        })
+    except Exception as e:
+        add_log('ERROR', f"分页获取队列失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/queue/all', methods=['GET'])
 def get_queue_all():
     seen = set()
@@ -2864,6 +2925,22 @@ def update_queue_status(id):
         
         add_log("INFO", f"Updated {item['planCode']} status to {item['status']}")
     
+    return jsonify({"status": "success"})
+
+@app.route('/api/queue/<id>/restart', methods=['PUT'])
+def restart_queue_item(id):
+    item = next((item for item in queue if item["id"] == id), None)
+    if not item:
+        return jsonify({"status": "error", "error": "队列项不存在"}), 404
+    item["purchased"] = 0
+    item["failureCount"] = 0
+    item["retryCount"] = 0
+    item["lastCheckTime"] = 0
+    item["nextAttemptAt"] = 0
+    item["status"] = "running"
+    item["updatedAt"] = datetime.now().isoformat()
+    save_data()
+    update_stats()
     return jsonify({"status": "success"})
 
 @app.route('/api/queue/<id>', methods=['PUT'])
