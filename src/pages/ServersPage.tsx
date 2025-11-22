@@ -132,6 +132,8 @@ const ServersPage = () => {
   const hasLoadedFromCache = useRef(false);
   // 新增：标记是否真正在从API获取数据，防止并发
   const [isActuallyFetching, setIsActuallyFetching] = useState(false);
+  // 新增：抑制首次刷新时的重复提示
+  const fetchToastShownRef = useRef(false);
   
   // 视图模式：grid 或 list (移动端只支持grid)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
@@ -214,17 +216,19 @@ const ServersPage = () => {
     try {
       console.log(`开始从API获取服务器数据... (forceRefresh: ${forceRefresh}, showApiServers: ${authState})`);
       
-      // 首次加载提示用户需要等待
-      if (forceRefresh && !hasLoadedFromCache.current) {
+      // 首次加载提示用户需要等待（防重复）
+      if (forceRefresh && !hasLoadedFromCache.current && !fetchToastShownRef.current) {
+        fetchToastShownRef.current = true;
         toast.info('正在从OVH获取服务器列表，首次加载可能需要1-2分钟，请耐心等待...', {
           duration: 5000
         });
       }
       
-      const response = await api.get(`/servers`, {
+      // 先尝试读取后端缓存（共享于所有账户）
+      let response = await api.get(`/servers`, {
         params: { 
-          showApiServers: authState,
-          forceRefresh: forceRefresh 
+          showApiServers: false,
+          forceRefresh: false 
         }
       });
       
@@ -264,6 +268,30 @@ const ServersPage = () => {
         return;
       }
       
+      // 若缓存为空且已认证，则回退到实时拉取
+      if ((!serversList || serversList.length === 0) && authState) {
+        if (!hasLoadedFromCache.current && !fetchToastShownRef.current) {
+          fetchToastShownRef.current = true;
+          toast.info('缓存为空，正在从 OVH 拉取服务器列表，首次加载可能需要 1–2 分钟', { duration: 5000 });
+        }
+        response = await api.get(`/servers`, {
+          params: { 
+            showApiServers: true,
+            forceRefresh: true 
+          }
+        });
+        if (response.data && typeof response.data === 'object') {
+          if (Array.isArray(response.data)) {
+            serversList = response.data;
+          } else if (response.data.servers && Array.isArray(response.data.servers)) {
+            serversList = response.data.servers;
+          }
+        }
+        if (serversList && serversList.length > 0) {
+          toast.success('服务器列表已从 OVH 更新');
+        }
+      }
+
       console.log("解析后的服务器列表:", serversList);
       console.log(`获取到 ${serversList.length} 台服务器`);
       
@@ -327,6 +355,10 @@ const ServersPage = () => {
       setIsRefreshing(false);
       // 更新最后刷新时间
       setLastUpdated(new Date());
+      // 标记已完成首次加载，避免重复首刷提示
+      if (!hasLoadedFromCache.current) {
+        hasLoadedFromCache.current = true;
+      }
       
       console.log(`✅ 服务器数据已设置: ${formattedServers.length} 台服务器`);
       console.log(`🔍 setServers后，ref.size = ${subscribedServersRef.current.size}`);

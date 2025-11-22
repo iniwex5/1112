@@ -83,6 +83,7 @@ VPS_SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "vps_subscriptions.json")
 config = {
     "tgToken": "",
     "tgChatId": "",
+    "sshKey": "",
 }
 
 accounts = {}
@@ -2618,6 +2619,8 @@ def save_settings():
         config["tgToken"] = data.get("tgToken")
     if data.get("tgChatId") is not None:
         config["tgChatId"] = data.get("tgChatId")
+    if data.get("sshKey") is not None:
+        config["sshKey"] = data.get("sshKey") or ""
 
     save_data()
     add_log("INFO", "API 设置已更新并写入 config.json")
@@ -5528,13 +5531,30 @@ def install_os(service_name):
     try:
         # 构建安装参数 - OVH API格式
         install_params = {
-            'operatingSystem': template_name  # OVH API正确的参数名
+            'operatingSystem': template_name
         }
         
-        # 自定义主机名 - 只在有值时才添加
         if data.get('customHostname'):
             install_params['customHostname'] = data['customHostname']
             add_log("INFO", f"设置自定义主机名: {data['customHostname']}", "server_control")
+
+        ssh_key = data.get('sshKey') or data.get('ssh_key')
+        use_global_ssh = bool(data.get('useGlobalSshKey'))
+        global_ssh = (config.get('sshKey') or '').strip()
+        if use_global_ssh and global_ssh:
+            install_params['customizations'] = {
+                'sshKey': global_ssh
+            }
+            if data.get('customHostname'):
+                install_params['customizations']['hostname'] = data['customHostname']
+            add_log("INFO", "使用设置中的全局SSH公钥", "server_control")
+        elif ssh_key:
+            install_params['customizations'] = {
+                'sshKey': ssh_key
+            }
+            if data.get('customHostname'):
+                install_params['customizations']['hostname'] = data['customHostname']
+            add_log("INFO", "使用请求中的SSH公钥", "server_control")
         
         # Proxmox 9 + ZFS 根文件系统预设
         if data.get('useProxmox9Zfs'):
@@ -9431,6 +9451,41 @@ def resolve_account_info():
             msg = f"{msg} OVH-Query-ID: {qid}"
         add_log("ERROR", f"解析账户信息失败: {msg}", "accounts")
         return jsonify({"success": False, "error": msg}), 400
+
+@app.route('/api/accounts/status', methods=['GET'])
+def accounts_status():
+    results = []
+    for acc in accounts.values():
+        aid = acc.get('id')
+        try:
+            client = ovh.Client(
+                endpoint=acc.get('endpoint') or 'ovh-eu',
+                application_key=acc.get('appKey') or '',
+                application_secret=acc.get('appSecret') or '',
+                consumer_key=acc.get('consumerKey') or ''
+            )
+            _ = client.get('/me')
+            results.append({
+                "id": aid,
+                "valid": True
+            })
+        except Exception as e:
+            qid = None
+            try:
+                resp = getattr(e, 'httpResponse', None)
+                if resp:
+                    qid = resp.headers.get('OVH-Query-ID') or resp.headers.get('X-Ovh-QueryID')
+            except Exception:
+                pass
+            msg = str(e)
+            if qid:
+                msg = f"{msg} OVH-Query-ID: {qid}"
+            results.append({
+                "id": aid,
+                "valid": False,
+                "error": msg
+            })
+    return jsonify({"accounts": results})
 
 if __name__ == '__main__':
     # 确保所有文件都存在

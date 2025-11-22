@@ -1,9 +1,10 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { useAPI } from "@/context/APIContext";
 import { api } from "@/utils/apiClient";
+import { toast } from "sonner";
 
 interface StatsType {
   activeQueues: number;
@@ -40,6 +41,7 @@ const Dashboard = () => {
   });
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const fallbackToastShownRef = useRef(false);
 
   const getAccountLabel = (id?: string) => {
     if (!id) return '默认账户';
@@ -55,6 +57,11 @@ const Dashboard = () => {
           api.get(`/queue/all`)
         ]);
         setStats(statsResponse.data);
+        // 如果服务器总数为0（缓存为空），提示一次后台将从OVH更新
+        if (!fallbackToastShownRef.current && isAuthenticated && (statsResponse.data?.totalServers === 0)) {
+          fallbackToastShownRef.current = true;
+          toast.info('服务器缓存为空，后台将从 OVH 更新，首次加载可能需 1–2 分钟', { duration: 4000 });
+        }
         // 只显示活跃的队列项（running, pending, paused），最多3个
         const activeItems = queueResponse.data
           .filter((item: QueueItem) => ['running', 'pending', 'paused'].includes(item.status))

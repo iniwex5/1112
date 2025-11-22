@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAPI } from "@/context/APIContext";
@@ -102,6 +102,7 @@ const QueuePage = () => {
   const [completedTotalPages, setCompletedTotalPages] = useState<number>(1);
   const [pausedTotalPages, setPausedTotalPages] = useState<number>(1);
   const [activeTab, setActiveTab] = useState<'running' | 'completed' | 'paused'>('running');
+  const fallbackToastShownRef = useRef(false);
 
   const getAccountLabel = (id?: string) => {
     if (!id) return '默认账户';
@@ -152,10 +153,23 @@ const QueuePage = () => {
   // Fetch servers for the add form
   const fetchServers = async (forceRefresh = false) => {
     try {
-      const response = await api.get(`/servers`, {
-        params: { showApiServers: isAuthenticated, forceRefresh },
+      const resCache = await api.get(`/servers`, {
+        params: { showApiServers: false, forceRefresh: false },
       });
-      const serversList = response.data.servers || response.data || [];
+      let serversList = resCache.data.servers || resCache.data || [];
+      if ((!serversList || serversList.length === 0) && isAuthenticated) {
+        if (!fallbackToastShownRef.current) {
+          fallbackToastShownRef.current = true;
+          toast.info('缓存为空，正在从 OVH 拉取服务器列表，首次加载可能需 1–2 分钟', { duration: 4000 });
+        }
+        const resLive = await api.get(`/servers`, {
+          params: { showApiServers: true, forceRefresh: true },
+        });
+        serversList = resLive.data.servers || resLive.data || [];
+        if (serversList && serversList.length > 0) {
+          toast.success('服务器列表已从 OVH 更新');
+        }
+      }
       setServers(serversList);
       return serversList;
     } catch (error) {
@@ -316,14 +330,11 @@ const QueuePage = () => {
   useEffect(() => {
     fetchQueueItems();
     (async () => {
-      const list = await fetchServers(false);
-      if (isAuthenticated && (!list || list.length === 0)) {
-        await fetchServers(true);
-      }
+      await fetchServers(false);
     })();
     const interval = setInterval(fetchQueueItems, QUEUE_POLLING_INTERVAL);
     return () => clearInterval(interval);
-  }, [isAuthenticated]);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -397,34 +408,7 @@ const QueuePage = () => {
           setSelectedOptions([]);
           setOptionsInput('');
         }
-        if (isAuthenticated) {
-          (async () => {
-            try {
-              const refreshed = await fetchServers(true);
-              const srv = refreshed.find(s => s.planCode === planCodeDebounced);
-              if (srv && Array.isArray(srv.datacenters)) {
-                const dcList = srv.datacenters
-                  .map(d => d.datacenter?.toLowerCase())
-                  .map(d => (d === 'ynm' ? 'mum' : d))
-                  .filter(Boolean) as string[];
-                const validDcs = OVH_DATACENTERS.map(dc => dc.code);
-                const filtered = dcList.filter(dc => validDcs.includes(dc));
-                const uniqueFiltered = Array.from(new Set(filtered));
-                setVisibleDatacenters(uniqueFiltered);
-                if (!editingItemId) {
-                  setSelectedDatacenters([]);
-                  const defaults = (srv.defaultOptions || []).map(o => o.value);
-                  if (defaults.length > 0 && selectedOptions.length === 0) {
-                    setSelectedOptions(prev => {
-                      const set = new Set([...prev, ...defaults]);
-                      return Array.from(set);
-                    });
-                  }
-                }
-              }
-            } catch {}
-          })();
-        }
+        
       }
     } else {
       setSelectedServer(null);
@@ -435,7 +419,7 @@ const QueuePage = () => {
         setOptionsInput('');
       }
     }
-  }, [planCodeDebounced, servers, isAuthenticated, editingItemId, selectedOptions.length]);
+  }, [planCodeDebounced, servers, editingItemId, selectedOptions.length]);
 
   // 不自动重置选项 - 用户可能只是修改了 planCode，应保留已选配置
   
@@ -682,25 +666,11 @@ const QueuePage = () => {
       {/* Add Form */}
       {showAddForm && (
         <div className="bg-cyber-surface-dark p-4 sm:p-6 rounded-lg shadow-xl border border-cyber-border">
-          <h2 className={`${isMobile ? 'text-lg' : 'text-xl'} font-semibold mb-4 sm:mb-6 text-cyber-primary-accent`}>添加抢购任务</h2>
-          {editingItemId && (
-            <div className="flex items-center justify-between bg-cyber-grid/10 border border-cyber-accent/30 rounded-md px-3 py-2 mb-3">
-              <span className="text-xs text-cyber-muted">正在编辑队列项</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingItemId(null);
-                  setPlanCodeInput("");
-                  setSelectedDatacenters([]);
-                  setSelectedOptions([]);
-                  setOptionsInput('');
-                }}
-                className="cyber-button text-xs px-2 py-1"
-              >
-                取消编辑
-              </button>
-            </div>
-          )}
+          <div className="flex items-center justify-between mb-4 sm:mb-6">
+            <h2 className={`${isMobile ? 'text-lg' : 'text-xl'} font-semibold text-cyber-primary-accent`}>
+              {editingItemId ? '正在编辑队列项' : '添加抢购任务'}
+            </h2>
+          </div>
           
           <div className="space-y-4 sm:space-y-6 mb-4 sm:mb-6">
             <div className="flex flex-col md:flex-row md:items-end gap-3">
@@ -765,7 +735,7 @@ const QueuePage = () => {
               </div>
               <div className="md:w-[180px]">
                 <label className="block text-sm font-medium text-cyber-secondary mb-1">自动支付</label>
-                <div className="flex items-center justify-between bg-cyber-grid/10 border border-cyber-accent/30 rounded-md px-3 py-2">
+                <div className="flex items-center justify-between bg-cyber-surface border border-cyber-border rounded-md px-3 py-2">
                   <span className="text-xs text-cyber-muted">使用首选支付方式</span>
                   <Switch checked={autoPay} onCheckedChange={setAutoPay} />
                 </div>
@@ -917,13 +887,38 @@ const QueuePage = () => {
             </div>
             </div>
             <div className="mt-4">
-              <button
-                onClick={() => editingItemId ? updateQueueItem() : addQueueItem()}
-                className="w-full cyber-button bg-cyber-primary hover:bg-cyber-primary-dark text-white font-semibold py-2.5"
-                disabled={!planCodeInput.trim() || selectedDatacenters.length === 0}
-              >
-                {editingItemId ? '修改队列' : selectedDatacenters.length > 0 ? `添加到队列（目标 ${quantity} 台${selectedOptions.length > 0 ? `，含${selectedOptions.length}个可选配置` : ''}）` : '添加到队列'}
-              </button>
+              {editingItemId ? (
+                <div className="flex flex-col md:flex-row gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingItemId(null);
+                      setPlanCodeInput("");
+                      setSelectedDatacenters([]);
+                      setSelectedOptions([]);
+                      setOptionsInput('');
+                    }}
+                    className="cyber-button w-full md:flex-1 px-4 py-2.5"
+                  >
+                    取消编辑
+                  </button>
+                  <button
+                    onClick={() => updateQueueItem()}
+                    className="cyber-button w-full md:flex-1 bg-cyber-primary hover:bg-cyber-primary-dark text-white font-semibold py-2.5"
+                    disabled={!planCodeInput.trim() || selectedDatacenters.length === 0}
+                  >
+                    修改队列
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => addQueueItem()}
+                  className="w-full cyber-button bg-cyber-primary hover:bg-cyber-primary-dark text-white font-semibold py-2.5"
+                  disabled={!planCodeInput.trim() || selectedDatacenters.length === 0}
+                >
+                  {selectedDatacenters.length > 0 ? `添加到队列（目标 ${quantity} 台${selectedOptions.length > 0 ? `，含${selectedOptions.length}个可选配置` : ''}）` : '添加到队列'}
+                </button>
+              )}
             </div>
           </div>
       )}

@@ -4,7 +4,7 @@ import { api, getApiSecretKey } from "@/utils/apiClient";
 import { toast } from "sonner";
 
 const APIAccountsPage = () => {
-  const { accounts, currentAccountId, setCurrentAccount, refreshAccounts } = useAPI();
+  const { accounts, currentAccountId, setCurrentAccount, refreshAccounts, accountStatuses, refreshAccountStatuses } = useAPI();
   const [form, setForm] = useState({
     id: "",
     alias: "",
@@ -17,12 +17,12 @@ const APIAccountsPage = () => {
   const [showValues, setShowValues] = useState({ appKey: false, appSecret: false, consumerKey: false });
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string>("");
-  const [debugLoading, setDebugLoading] = useState(false);
-  const [debugInfo, setDebugInfo] = useState<any | null>(null);
-  const [debugError, setDebugError] = useState<string>("");
 
   useEffect(() => {
-    refreshAccounts();
+    (async () => {
+      await refreshAccounts();
+      await refreshAccountStatuses();
+    })();
   }, []);
 
   const onChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -125,19 +125,6 @@ const APIAccountsPage = () => {
     }
   };
 
-  const fetchDebugInfo = async () => {
-    setDebugLoading(true);
-    setDebugError("");
-    try {
-      const res = await api.get('/debug/account');
-      setDebugInfo(res.data);
-    } catch (e: any) {
-      setDebugError(e?.response?.data?.error || e?.message || '加载失败');
-      setDebugInfo(null);
-    } finally {
-      setDebugLoading(false);
-    }
-  };
 
   return (
     <div className="space-y-6">
@@ -259,13 +246,13 @@ const APIAccountsPage = () => {
                   className="text-xs bg-cyber-bg/50 border border-cyber-accent/30 rounded px-2 py-1 text-cyber-text"
                   value={currentAccountId || ''}
                   onChange={(e) => setCurrentAccount(e.target.value)}
+                  disabled={accounts.length === 0}
                 >
-                  <option value="">请选择账户</option>
                   {accounts.map((acc: any) => (
                     <option key={acc.id} value={acc.id}>{acc.alias || acc.id}</option>
                   ))}
                 </select>
-                <button onClick={fetchDebugInfo} className="cyber-button text-xs px-2 py-1">调试当前账户</button>
+                
               </div>
             </div>
 
@@ -278,6 +265,17 @@ const APIAccountsPage = () => {
                   <div className="text-sm">
                     <div className="font-medium flex items-center gap-2">
                       <span>{acc.alias || acc.id}</span>
+                      {(() => {
+                        const hasCreds = !!(acc.appKey && acc.appSecret && acc.consumerKey);
+                        if (!hasCreds) {
+                          return <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">未配置</span>;
+                        }
+                        const st = accountStatuses[acc.id];
+                        if (!st) return <span className="text-xs text-cyber-muted">检测中...</span>;
+                        return st.valid
+                          ? <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">已连接</span>
+                          : <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-400" title={st.error || ''}>未连接</span>;
+                      })()}
                     </div>
                     <div className="text-cyber-muted">{acc.endpoint} · {acc.zone}</div>
                   </div>
@@ -290,25 +288,7 @@ const APIAccountsPage = () => {
               ))}
             </div>
 
-            <div className="cyber-grid-line pt-3">
-              <h3 className="font-medium mb-2">调试信息</h3>
-              {debugLoading && <div className="text-xs text-cyber-muted">加载中...</div>}
-              {debugError && <div className="text-xs text-red-400">{debugError}</div>}
-              {debugInfo && (
-                <div className="text-xs grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>请求头账户ID: {debugInfo.headerAccountId || '-'}</div>
-                  <div>解析账户ID: {debugInfo.requestedAccountId || '-'}</div>
-                  <div>账户存在: {String(debugInfo.exists)}</div>
-                  <div>别名: {debugInfo.alias || '-'}</div>
-                  <div>endpoint: {debugInfo.endpoint}</div>
-                  <div>zone: {debugInfo.zone}</div>
-                  <div>有AppKey: {String(debugInfo.hasAppKey)}</div>
-                  <div>有AppSecret: {String(debugInfo.hasAppSecret)}</div>
-                  <div>有ConsumerKey: {String(debugInfo.hasConsumerKey)}</div>
-                  
-                </div>
-              )}
-            </div>
+            
           </div>
         </div>
       </div>

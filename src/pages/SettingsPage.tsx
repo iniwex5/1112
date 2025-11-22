@@ -14,53 +14,23 @@ const SettingsPage = () => {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const { 
-    appKey, 
-    appSecret, 
-    consumerKey, 
-    endpoint,
     tgToken,
     tgChatId,
-    iam,
-    zone,
     isLoading,
-    isAuthenticated,
-    setAPIKeys,
-    checkAuthentication,
-    accounts,
-    currentAccountId,
-    setCurrentAccount,
-    refreshAccounts
+    checkAuthentication
   } = useAPI();
 
   const [formValues, setFormValues] = useState({
     apiSecretKey: "",
-    appKey: "",
-    appSecret: "",
-    consumerKey: "",
-    endpoint: "ovh-eu",
     tgToken: "",
     tgChatId: "",
-    iam: "go-ovh-ie",
-    zone: "IE"
+    sshKey: ""
   });
   const [isSaving, setIsSaving] = useState(false);
   const [showValues, setShowValues] = useState({
     apiSecretKey: false,
-    appKey: false,
-    appSecret: false,
-    consumerKey: false,
     tgToken: false
   });
-  const [accountForm, setAccountForm] = useState({
-    id: "",
-    alias: "",
-    appKey: "",
-    appSecret: "",
-    consumerKey: "",
-    endpoint: "ovh-eu",
-    zone: "IE"
-  });
-  const [isSubmittingAccount, setIsSubmittingAccount] = useState(false);
   
   // Telegram Webhook 相关状态
   const [webhookUrl, setWebhookUrl] = useState("");
@@ -70,32 +40,31 @@ const SettingsPage = () => {
   const [showErrorHistoryDialog, setShowErrorHistoryDialog] = useState(false);
   const [apiKeyValid, setApiKeyValid] = useState<boolean | null>(null);
   const [ovhAuthValid, setOvhAuthValid] = useState<boolean | null>(null);
-  const accountFieldsHidden = true;
 
-  // Load current values when component mounts
   useEffect(() => {
-    setFormValues({
+    setFormValues(prev => ({
+      ...prev,
       apiSecretKey: getApiSecretKey() || "",
-      appKey: appKey || "",
-      appSecret: appSecret || "",
-      consumerKey: consumerKey || "",
-      endpoint: endpoint || "ovh-eu",
       tgToken: tgToken || "",
-      tgChatId: tgChatId || "",
-      iam: iam || "go-ovh-ie",
-      zone: zone || "IE"
-    });
-  }, [appKey, appSecret, consumerKey, endpoint, tgToken, tgChatId, iam, zone]);
+      tgChatId: tgChatId || ""
+    }));
+  }, [tgToken, tgChatId]);
 
-  // Auto-update IAM when zone changes
+  // 加载后端设置中的 SSH 公钥
   useEffect(() => {
-    if (formValues.zone) {
-      setFormValues(prev => ({
-        ...prev,
-        iam: `go-ovh-${formValues.zone.toLowerCase()}`
-      }));
-    }
-  }, [formValues.zone]);
+    (async () => {
+      try {
+        const resp = await api.get('/settings');
+        const cfg = resp.data || {};
+        setFormValues(prev => ({
+          ...prev,
+          sshKey: cfg.sshKey || "",
+          tgToken: cfg.tgToken || prev.tgToken || "",
+          tgChatId: cfg.tgChatId || prev.tgChatId || ""
+        }));
+      } catch {}
+    })();
+  }, []);
 
   // 加载 Webhook 信息（可选功能，失败不显示错误）
   const loadWebhookInfo = async () => {
@@ -223,12 +192,10 @@ const SettingsPage = () => {
     })();
   }, []);
 
-  useEffect(() => {
-    setOvhAuthValid(isAuthenticated);
-  }, [isAuthenticated]);
+  
 
   // Handle input changes
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     setFormValues({
       ...formValues,
@@ -262,38 +229,23 @@ const SettingsPage = () => {
       // 等待一下确保 localStorage 写入完成
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      // 2. 检查是否填写了 OVH API 配置
-      const hasOVHConfig = formValues.appKey && formValues.appSecret && formValues.consumerKey;
-      
-      if (hasOVHConfig) {
-        // 如果填写了 OVH API，则保存并验证
-        await setAPIKeys(formValues);
-        const isValid = await checkAuthentication();
-        
-        if (isValid) {
-          toast.success("所有设置已保存并验证通过");
-          // 刷新页面加载新配置
-          setTimeout(() => {
-            window.location.reload();
-          }, 500);
-        } else {
-          toast.warning("OVH API 配置已保存，但验证失败，请检查密钥是否正确");
-          setIsSaving(false);
-          setOvhAuthValid(false);
-        }
-      } else {
-        // 未填写 OVH API：也要保存 Telegram 配置到后端（部分更新）
-        try {
-          await api.post('/settings', {
-            tgToken: formValues.tgToken || undefined,
-            tgChatId: formValues.tgChatId || undefined
-          });
-          toast.success("访问密码与Telegram配置已保存，页面将刷新");
-        } catch (err) {
-          toast.error("保存Telegram配置失败");
-        }
-        setTimeout(() => { window.location.reload(); }, 800);
+      try {
+        await api.post('/settings', {
+          tgToken: formValues.tgToken || undefined,
+          tgChatId: formValues.tgChatId || undefined,
+          sshKey: formValues.sshKey || undefined
+        });
+        toast.success("访问密码与Telegram配置已保存，页面将刷新");
+      } catch (err) {
+        toast.error("保存Telegram配置失败");
       }
+      setTimeout(() => { window.location.reload(); }, 800);
+      // 无论是否有OVH配置，确保SSH设置已同步保存
+      try {
+        await api.post('/settings', {
+          sshKey: formValues.sshKey || undefined
+        });
+      } catch {}
     } catch (error) {
       console.error("Error saving settings:", error);
       toast.error("保存设置失败");
@@ -301,59 +253,7 @@ const SettingsPage = () => {
     }
   };
 
-  const handleAccountFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setAccountForm(prev => ({ ...prev, [name]: value }));
-  };
-
-  const handleAddOrUpdateAccount = async () => {
-    if (!accountForm.id) {
-      toast.error('请输入账户ID');
-      return;
-    }
-    setIsSubmittingAccount(true);
-    try {
-      const res = await api.post('/accounts', accountForm);
-      if (res.data?.success) {
-        toast.success('账户已保存');
-        await refreshAccounts();
-      } else {
-        toast.error(res.data?.error || '保存失败');
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.error || error.message || '保存失败');
-    } finally {
-      setIsSubmittingAccount(false);
-    }
-  };
-
-  const handleDeleteAccount = async (id: string) => {
-    try {
-      const res = await api.delete(`/accounts/${id}`);
-      if (res.data?.success) {
-        toast.success('账户已删除');
-        await refreshAccounts();
-      } else {
-        toast.error(res.data?.error || '删除失败');
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.error || error.message || '删除失败');
-    }
-  };
-
-  const handleSetDefaultAccount = async (id: string) => {
-    try {
-      const res = await api.put('/accounts/default', { id });
-      if (res.data?.success) {
-        toast.success('默认账户已设置');
-        await refreshAccounts();
-      } else {
-        toast.error(res.data?.error || '设置失败');
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.error || error.message || '设置失败');
-    }
-  };
+  
 
   return (
     <div className="space-y-4 sm:space-y-6">
@@ -428,177 +328,20 @@ const SettingsPage = () => {
                 </div>
               </div>
               
-              <div className={`cyber-grid-line pt-4 ${accountFieldsHidden ? 'hidden' : ''}`}>
-                <h2 className={`${isMobile ? 'text-lg' : 'text-xl'} font-bold mb-3 sm:mb-4`}>OVH API 凭据</h2>
-                
-                <div className="space-y-3 sm:space-y-4">
-                  <div>
-                    <label className="block text-cyber-muted mb-1 text-xs sm:text-sm">
-                      应用密钥 (APP KEY)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showValues.appKey ? "text" : "password"}
-                        name="appKey"
-                        value={formValues.appKey}
-                        onChange={handleChange}
-                        className="cyber-input w-full pr-10 text-sm"
-                        placeholder="xxxxxxxxxxxxxxxx"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleShowValue("appKey")}
-                        className="absolute inset-y-0 right-0 px-3 text-cyber-muted hover:text-cyber-accent"
-                      >
-                        {showValues.appKey ? (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                            <line x1="1" y1="1" x2="23" y2="23"></line>
-                          </svg>
-                        ) : (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                            <circle cx="12" cy="12" r="3"></circle>
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-cyber-muted mb-1">
-                      应用密钥 (APP SECRET)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showValues.appSecret ? "text" : "password"}
-                        name="appSecret"
-                        value={formValues.appSecret}
-                        onChange={handleChange}
-                        className="cyber-input w-full pr-10"
-                        placeholder="xxxxxxxxxxxxxxxx"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleShowValue("appSecret")}
-                        className="absolute inset-y-0 right-0 px-3 text-cyber-muted hover:text-cyber-accent"
-                      >
-                        {showValues.appSecret ? (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                            <line x1="1" y1="1" x2="23" y2="23"></line>
-                          </svg>
-                        ) : (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                            <circle cx="12" cy="12" r="3"></circle>
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-cyber-muted mb-1">
-                      消费者密钥 (CONSUMER KEY)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showValues.consumerKey ? "text" : "password"}
-                        name="consumerKey"
-                        value={formValues.consumerKey}
-                        onChange={handleChange}
-                        className="cyber-input w-full pr-10"
-                        placeholder="xxxxxxxxxxxxxxxx"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleShowValue("consumerKey")}
-                        className="absolute inset-y-0 right-0 px-3 text-cyber-muted hover:text-cyber-accent"
-                      >
-                        {showValues.consumerKey ? (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                            <line x1="1" y1="1" x2="23" y2="23"></line>
-                          </svg>
-                        ) : (
-                          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                            <circle cx="12" cy="12" r="3"></circle>
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-cyber-muted mb-1">
-                      API 节点 (ENDPOINT)
-                    </label>
-                    <select
-                      name="endpoint"
-                      value={formValues.endpoint}
-                      onChange={handleChange}
-                      className="cyber-input w-full"
-                    >
-                      <option value="ovh-eu">🇪🇺 欧洲 (ovh-eu) - eu.api.ovh.com</option>
-                      <option value="ovh-us">🇺🇸 美国 (ovh-us) - api.us.ovhcloud.com</option>
-                      <option value="ovh-ca">🇨🇦 加拿大 (ovh-ca) - ca.api.ovh.com</option>
-                    </select>
-                    <p className="text-xs text-cyan-400 mt-1">
-                      ⚠️ 请选择与您OVH账户所在区域匹配的endpoint
-                    </p>
-                  </div>
-                </div>
-              </div>
               
-              <div className={`cyber-grid-line pt-4 ${accountFieldsHidden ? 'hidden' : ''}`}>
-                <h2 className="text-xl font-bold mb-4">区域设置</h2>
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-cyber-muted mb-1">
-                      OVH 子公司 (ZONE)
-                    </label>
-                    <select
-                      name="zone"
-                      value={formValues.zone}
-                      onChange={handleChange}
-                      className="cyber-input w-full"
-                    >
-                      <option value="IE">爱尔兰 (IE)</option>
-                      <option value="FR">法国 (FR)</option>
-                      <option value="GB">英国 (GB)</option>
-                      <option value="DE">德国 (DE)</option>
-                      <option value="ES">西班牙 (ES)</option>
-                      <option value="PT">葡萄牙 (PT)</option>
-                      <option value="IT">意大利 (IT)</option>
-                      <option value="PL">波兰 (PL)</option>
-                      <option value="FI">芬兰 (FI)</option>
-                      <option value="LT">立陶宛 (LT)</option>
-                      <option value="CZ">捷克 (CZ)</option>
-                      <option value="NL">荷兰 (NL)</option>
-                      <option value="CA">加拿大 (CA)</option>
-                      <option value="US">美国 (US)</option>
-                    </select>
-                    <p className="text-xs text-cyber-muted mt-1">默认: IE (欧洲区), CA (加拿大), US (美国)</p>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-cyber-muted mb-1">
-                      标识 (IAM)
-                    </label>
-                    <input
-                      type="text"
-                      name="iam"
-                      value={formValues.iam}
-                      onChange={handleChange}
-                      className="cyber-input w-full"
-                      placeholder="go-ovh-ie"
-                    />
-                    <p className="text-xs text-cyber-muted mt-1">默认会根据 ZONE 设置自动生成，例如: go-ovh-ie</p>
-                  </div>
-                </div>
+
+              {/* SSH 公钥（全局） */}
+              <div className="cyber-grid-line pt-4">
+                <h2 className="text-xl font-bold mb-3">SSH 公钥（全局）</h2>
+                <p className="text-xs text-cyber-muted mb-2">为所有账户的Linux系统安装统一预置SSH免密登录公钥</p>
+                <textarea
+                  name="sshKey"
+                  value={formValues.sshKey}
+                  onChange={handleChange}
+                  placeholder="ssh-rsa 或 ssh-ed25519 公钥行（完整）"
+                  className="cyber-input w-full h-24"
+                />
+                <p className="text-xs text-cyan-400 mt-1">Windows 模板不适用 SSH 公钥（会被忽略）</p>
               </div>
               
               <div className="cyber-grid-line pt-4">
@@ -856,18 +599,7 @@ const SettingsPage = () => {
                   </div>
                   <span className="text-xs text-cyber-muted">{apiKeyValid === null ? '检测中' : apiKeyValid ? '已通过' : '未设置或不匹配'}</span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-3 h-3 rounded-full ${ovhAuthValid ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
-                    <span className={`${ovhAuthValid ? 'text-green-400' : 'text-red-400'} text-sm`}>OVH API</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-cyber-muted">{ovhAuthValid === null ? '检测中' : ovhAuthValid ? '已连接' : '未连接'}</span>
-                    <button type="button" className="cyber-button h-7 px-2 text-xs" onClick={async () => { const valid = await checkAuthentication(); setOvhAuthValid(!!valid); }}>
-                      重新验证
-                    </button>
-                  </div>
-                </div>
+                
                 
                 <div className="cyber-grid-line pt-4">
                   <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-3 mb-4">
@@ -1007,3 +739,4 @@ const SettingsPage = () => {
 };
 
 export default SettingsPage;
+  

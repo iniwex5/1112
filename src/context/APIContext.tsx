@@ -31,6 +31,8 @@ interface APIContextType {
   currentAccountId: string;
   setCurrentAccount: (id: string) => Promise<void>;
   refreshAccounts: () => Promise<void>;
+  accountStatuses: Record<string, { valid: boolean; error?: string }>;
+  refreshAccountStatuses: () => Promise<void>;
 }
 
 interface APIKeysType {
@@ -61,6 +63,7 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [currentAccountId, setCurrentAccountIdState] = useState<string>('');
+  const [accountStatuses, setAccountStatuses] = useState<Record<string, { valid: boolean; error?: string }>>({});
 
   // Load API keys from backend on mount
   useEffect(() => {
@@ -77,17 +80,20 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
         
         const response = await api.get(`/settings`);
         const data = response.data;
-        
+
+        // 始终加载 Telegram 设置（不依赖 OVH 账户是否存在）
+        setTgToken(data?.tgToken || '');
+        setTgChatId(data?.tgChatId || '');
+
+        // 仅当存在全局（旧）OVH设置时才填充这些字段
         if (data && data.appKey) {
           setAppKey(data.appKey);
           setAppSecret(data.appSecret);
           setConsumerKey(data.consumerKey);
           setEndpoint(data.endpoint || 'ovh-eu');
-          setTgToken(data.tgToken || '');
-          setTgChatId(data.tgChatId || '');
           setIam(data.iam || 'go-ovh-ie');
           setZone(data.zone || 'IE');
-          
+
           setIsAuthenticated(true);
           apiEvents.emitAuthChanged(true);
         }
@@ -103,6 +109,29 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
     loadAPIKeys();
   }, []);
 
+  const refreshAccountStatuses = async (): Promise<void> => {
+    try {
+      const res = await api.get('/accounts/status');
+      const arr: any[] = res.data?.accounts || [];
+      const map: Record<string, { valid: boolean; error?: string }> = {};
+      for (const it of arr) {
+        if (it && it.id) map[it.id] = { valid: !!it.valid, error: it.error };
+      }
+      if (arr.length === 0 && accounts.length > 0) {
+        for (const acc of accounts) {
+          map[acc.id] = { valid: false, error: '状态不可用' };
+        }
+      }
+      setAccountStatuses(map);
+    } catch (e: any) {
+      const map: Record<string, { valid: boolean; error?: string }> = {};
+      for (const acc of accounts) {
+        map[acc.id] = { valid: false, error: e?.response?.data?.error || e?.message || '检查失败' };
+      }
+      setAccountStatuses(map);
+    }
+  };
+
   const refreshAccounts = async (): Promise<void> => {
     try {
       const res = await api.get('/accounts');
@@ -115,6 +144,7 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
         localStorage.setItem('current_account_id', useId);
         try { await checkAuthentication(); } catch {}
       }
+      try { await refreshAccountStatuses(); } catch {}
     } catch (e: any) {
       setAccounts([]);
       const msg = e?.response?.data?.error || '无法获取账户列表，请先在“系统设置”配置访问密钥';
@@ -125,6 +155,12 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     refreshAccounts();
   }, []);
+
+  useEffect(() => {
+    if (accounts && accounts.length > 0) {
+      (async () => { try { await refreshAccountStatuses(); } catch {} })();
+    }
+  }, [accounts.map(a => a.id).join('|')]);
 
   // Save API keys to backend
   const setAPIKeys = async (keys: APIKeysType): Promise<void> => {
@@ -199,12 +235,7 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  useEffect(() => {
-    if (!currentAccountId) return;
-    (async () => {
-      try { await checkAuthentication(); } catch {}
-    })();
-  }, [currentAccountId]);
+  // 移除基于 currentAccountId 的二次认证，避免重复触发刷新
 
   const value = {
     appKey,
@@ -222,17 +253,19 @@ export const API_Provider = ({ children }: { children: ReactNode }) => {
     accounts,
     currentAccountId,
     setCurrentAccount,
-    refreshAccounts
+    refreshAccounts,
+    accountStatuses,
+    refreshAccountStatuses
   };
 
   return <APIContext.Provider value={value}>{children}</APIContext.Provider>;
 };
 
-// Custom hook to use the API context
-export const useAPI = (): APIContextType => {
-  const context = useContext(APIContext);
-  if (context === undefined) {
-    throw new Error('useAPI must be used within an APIProvider');
-  }
-  return context;
-};
+  // Custom hook to use the API context
+  export const useAPI = (): APIContextType => {
+    const context = useContext(APIContext);
+    if (context === undefined) {
+      throw new Error('useAPI must be used within an APIProvider');
+    }
+    return context;
+  };

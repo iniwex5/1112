@@ -6,6 +6,7 @@ import { useToast } from "../components/ToastContainer";
 import { Server, RefreshCw, Power, HardDrive, X, AlertCircle, Activity, Cpu, Wifi, Calendar, Monitor, Mail, BarChart3, Check, Cog, Zap, Shield, Database, Globe, Network, Settings } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { apiEvents } from '@/context/APIContext';
 
 interface ServerInfo {
   serviceName: string;
@@ -179,6 +180,8 @@ const ServerControlPage: React.FC = () => {
   const [templateSearchQuery, setTemplateSearchQuery] = useState(""); // 模板搜索
   const [selectedTemplate, setSelectedTemplate] = useState("");
   const [customHostname, setCustomHostname] = useState("");
+  const [sshKeyInput, setSshKeyInput] = useState("");
+  const [useGlobalSshKey, setUseGlobalSshKey] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [partitionSchemes, setPartitionSchemes] = useState<PartitionScheme[]>([]);
   const [selectedScheme, setSelectedScheme] = useState("");
@@ -790,6 +793,15 @@ const ServerControlPage: React.FC = () => {
       fetchDiskInfo(server.serviceName),
       fetchRaidProfiles(server.serviceName)
     ]);
+
+    // 根据后端配置自动勾选：如果检测到设置里已有SSH公钥，则默认勾选
+    try {
+      const resp = await api.get('/settings');
+      const cfg = resp.data || {};
+      const hasSsh = !!(cfg.sshKey && String(cfg.sshKey).trim().length > 0);
+      setUseGlobalSshKey(hasSsh);
+    } catch {}
+    setSshKeyInput('');
   };
 
   // Task 3: 重装系统
@@ -817,6 +829,12 @@ const ServerControlPage: React.FC = () => {
         zfsRaidLevel: useProxmox9Zfs ? zfsRaidLevel : undefined,  // RAID 级别
         zfsVzSize: useProxmox9Zfs ? zfsVzSize : undefined  // /var/lib/vz 大小
       };
+      // SSH 公钥与开关
+      if (useGlobalSshKey) {
+        installData.useGlobalSshKey = true;
+      } else if (sshKeyInput.trim()) {
+        installData.sshKey = sshKeyInput.trim();
+      }
       
       // 如果用户启用了自定义存储配置或软RAID
       if (useCustomStorage || useSoftwareRaid) {
@@ -2066,6 +2084,27 @@ const ServerControlPage: React.FC = () => {
     fetchServers();
   }, []);
 
+  // 轻量级刷新：监听账户认证变化，刷新当前页面数据
+  useEffect(() => {
+    const unsubscribe = apiEvents.onAuthChanged(async (newAuthState) => {
+      try {
+        await fetchServers(true);
+        if (selectedServer) {
+          await Promise.all([
+            fetchMonitoring(selectedServer.serviceName),
+            fetchHardware(selectedServer.serviceName),
+            fetchIPs(selectedServer.serviceName),
+            fetchServiceInfo(selectedServer.serviceName),
+            fetchInterventions(selectedServer.serviceName),
+            fetchNetworkInterfaces(selectedServer.serviceName),
+            fetchMrtgData(selectedServer.serviceName)
+          ]);
+        }
+      } catch {}
+    });
+    return () => { unsubscribe(); };
+  }, [selectedServer?.serviceName]);
+
   // Task 5-8: 当选择服务器时加载数据
   useEffect(() => {
     if (selectedServer) {
@@ -3164,21 +3203,47 @@ const ServerControlPage: React.FC = () => {
                         </option>
                       ))}
                   </select>
-                </div>
+              </div>
 
-                <div>
-                  <label className="block text-cyber-text font-medium mb-2">自定义主机名（可选）</label>
+              <div>
+                <label className="block text-cyber-text font-medium mb-2">自定义主机名（可选）</label>
+                <input
+                  type="text"
+                  placeholder="例如: server1.example.com"
+                  value={customHostname}
+                  onChange={(e) => setCustomHostname(e.target.value)}
+                  className="w-full px-4 py-3 bg-cyber-bg border-2 border-cyber-accent/40 rounded-lg text-cyber-text placeholder-cyber-muted focus:border-cyber-accent focus:ring-2 focus:ring-cyber-accent/30 hover:border-cyber-accent/60 transition-all"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)'
+                  }}
+                />
+              </div>
+
+              {/* SSH 公钥配置 */}
+              <div>
+                <label className="block text-cyber-text font-medium mb-2">SSH 公钥（Linux安装）</label>
+                <textarea
+                  placeholder="ssh-rsa 或 ssh-ed25519 公钥行"
+                  value={sshKeyInput}
+                  onChange={(e) => setSshKeyInput(e.target.value)}
+                  disabled={useGlobalSshKey}
+                  className={`w-full px-4 py-3 bg-cyber-bg border-2 border-cyber-accent/40 rounded-lg text-cyber-text placeholder-cyber-muted focus:border-cyber-accent focus:ring-2 focus:ring-cyber-accent/30 hover:border-cyber-accent/60 transition-all ${useGlobalSshKey ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)'
+                  }}
+                  rows={3}
+                />
+                <label className="flex items-center gap-2 mt-2">
                   <input
-                    type="text"
-                    placeholder="例如: server1.example.com"
-                    value={customHostname}
-                    onChange={(e) => setCustomHostname(e.target.value)}
-                    className="w-full px-4 py-3 bg-cyber-bg border-2 border-cyber-accent/40 rounded-lg text-cyber-text placeholder-cyber-muted focus:border-cyber-accent focus:ring-2 focus:ring-cyber-accent/30 hover:border-cyber-accent/60 transition-all"
-                    style={{
-                      background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)'
-                    }}
+                    type="checkbox"
+                    checked={useGlobalSshKey}
+                    onChange={(e) => setUseGlobalSshKey(e.target.checked)}
+                    className="w-4 h-4 accent-cyan-500"
                   />
-                </div>
+                  <span className="text-sm text-cyber-text">使用设置页面里的全局SSH公钥</span>
+                </label>
+                <p className="text-xs text-cyan-400 mt-1">若启用，将忽略上方输入并使用设置中的公钥；Windows模板将忽略SSH公钥</p>
+              </div>
 
                 {/* 高级存储配置 */}
                 <div className="border-t border-cyber-accent/30 pt-4">
